@@ -1,0 +1,33 @@
+[telegram]
+source_channel = -1001234567890
+target_channel = -1009876543210
+
+[content]
+keep_tags = ["#必留标签"]
+drop_tags = ["#删除标签1", "#删除标签2"]
+caption_limit = 1024
+
+[schedule]
+timezone = "Asia/Shanghai"
+daily_time = "00:01"
+daily_success_count = 4
+
+[processing]
+ffmpeg_path = "ffmpeg"
+ffprobe_path = "ffprobe"
+ffmpeg_threads = 3
+crf = 23
+preset = "medium"
+audio_bitrate = "128k"
+minimum_source_short_edge = 1080
+album_settle_seconds = 300
+disk_reserve_bytes = 1073741824
+
+[runtime]
+database_path = "./data/operator.db"
+work_dir = "./work"
+max_candidates_per_run = 12
+max_runtime_hours = 6
+retry_delays_seconds = [30, 120, 600]
+notify_saved_messages = true
+

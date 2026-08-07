@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram channel automation job
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=channel-operator
+Group=channel-operator
+WorkingDirectory=/opt/telegram-channel-operator
+ExecStart=/opt/telegram-channel-operator/.venv/bin/channel-operator --config /etc/channel-operator/config.toml run-once
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/channel-operator /var/cache/channel-operator
+

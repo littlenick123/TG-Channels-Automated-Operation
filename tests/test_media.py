@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from channel_operator.media import MediaProcessor
+
+
+def test_screenshot_time_rules():
+    assert MediaProcessor.screenshot_times(200) == (20, 100, 140)
+    assert MediaProcessor.screenshot_times(100) == (10, 50, 90)
+
+
+@pytest.mark.asyncio
+async def test_transcode_and_extract_three_frames(app_config, tmp_path: Path):
+    config = app_config()
+    processor = MediaProcessor(config)
+    source = tmp_path / "source.mp4"
+    process = await asyncio.create_subprocess_exec(
+        config.ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=1920x1080:rate=10:duration=2",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        str(source),
+    )
+    assert await process.wait() == 0
+
+    source_info = await processor.probe(source)
+    processor.validate_source(source_info)
+    output = tmp_path / "video.mp4"
+    output_info = await processor.transcode(source, output, source_info)
+    frames = await processor.screenshots(output, output_info.duration, tmp_path)
+
+    assert (output_info.width, output_info.height) == (1280, 720)
+    assert len(frames) == 3
+    assert all(frame.exists() and frame.stat().st_size > 0 for frame in frames)

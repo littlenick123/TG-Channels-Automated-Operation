@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import shutil
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from .captions import build_caption
+from .config import AppConfig
+from .database import StateDatabase
+from .media import InvalidSourceMedia, MediaProcessor
+from .models import MediaGroup, RunSummary
+from .telegram import SourceMediaUnavailable, TelegramGateway
+
+LOGGER = logging.getLogger(__name__)
+
+
+class AutomationService:
+    def __init__(
+        self,
+        config: AppConfig,
+        database: StateDatabase,
+        telegram: TelegramGateway,
+        media: MediaProcessor,
+    ):
+        self.config = config
+        self.database = database
+        self.telegram = telegram
+        self.media = media
+        self.source_key = str(config.source_channel)
+
+    async def index(self) -> int:
+        checkpoint = self.database.checkpoint(self.source_key)
+        batch = []
+        newest_id = checkpoint
+        scanned = 0
+        async for message in self.telegram.scan_messages(checkpoint):
+            batch.append(message)
+            newest_id = max(newest_id, message.message_id)
+            scanned += 1
+            if len(batch) >= 200:
+                self.database.save_messages(self.source_key, batch, newest_id)
+                batch.clear()
+                LOGGER.info("已扫描 %s 条新消息，检查点 %s", scanned, newest_id)
+        if batch or newest_id != checkpoint:
+            self.database.save_messages(self.source_key, batch, newest_id)
+        group_count = self.database.refresh_groups(self.source_key)
+        LOGGER.info("索引完成：新消息 %s 条，媒体组总数 %s", scanned, group_count)
+        return group_count
+
+    async def dry_run(self) -> list[tuple[int, str]]:
+        await self.index()
+        candidates = self.database.preview_candidates(
+            self.source_key,
+            self.config.minimum_source_short_edge,
+            self.config.album_settle_seconds,
+            self.config.daily_success_count,
+        )
+        previews = []
+        for candidate in candidates:
+            caption = build_caption(
+                candidate.caption,
+                self.config.keep_tags,
+                self.config.drop_tags,
+                limit=self.config.caption_limit,
+            )
+            previews.append((candidate.grouped_id, caption.plain))
+        return previews
+
+    def _work_directory(self, group: MediaGroup) -> Path:
+        self.config.work_dir.mkdir(parents=True, exist_ok=True)
+        return self.config.work_dir / f"{group.grouped_id}-{uuid.uuid4().hex[:8]}"
+
+    def _cleanup(self, directory: Path) -> None:
+        work_root = self.config.work_dir.resolve()
+        target = directory.resolve()
+        if target == work_root or work_root not in target.parents:
+            raise RuntimeError(f"拒绝清理工作目录以外的路径：{target}")
+        if target.exists():
+            shutil.rmtree(target)
+
+    async def _reconcile(self, group: MediaGroup, run_date: str) -> bool:
+        if group.status != "uploading" or not group.upload_started_at:
+            return False
+        receipt = await self.telegram.find_matching_album(
+            group.upload_started_at, group.attempt_caption_plain or ""
+        )
+        if receipt is None:
+            self.database.mark_failure(
+                self.source_key,
+                group.grouped_id,
+                "上次上传结果不确定，未自动重发，请人工核对目标频道",
+                permanent=True,
+            )
+            await self.telegram.notify(
+                f"⚠️ 源媒体组 {group.grouped_id} 的上传结果不确定，已暂停该组，请人工核对。"
+            )
+            return False
+        self.database.mark_published(
+            self.source_key,
+            group.grouped_id,
+            list(receipt.message_ids),
+            receipt.grouped_id,
+            run_date,
+        )
+        return True
+
+    async def _process_group(self, group: MediaGroup, run_date: str) -> None:
+        directory = self._work_directory(group)
+        directory.mkdir(parents=True, exist_ok=False)
+        try:
+            self.database.set_status(self.source_key, group.grouped_id, "downloading")
+            self.media.check_disk(group.file_size)
+            source = await self.telegram.download_video(
+                group.video_message_id, directory / "source_video.mp4"
+            )
+            source_info = await self.media.probe(source)
+            self.media.validate_source(source_info)
+
+            self.database.set_status(self.source_key, group.grouped_id, "transcoding")
+            output = directory / "video.mp4"
+            output_info = await self.media.transcode(source, output, source_info)
+            frames = await self.media.screenshots(output, output_info.duration, directory)
+
+            caption = build_caption(
+                group.caption,
+                self.config.keep_tags,
+                self.config.drop_tags,
+                limit=self.config.caption_limit,
+            )
+            upload_started_at = self.database.begin_upload(
+                self.source_key, group.grouped_id, caption.html, caption.plain
+            )
+            receipt = await self.telegram.send_album(
+                [output, *frames], caption.html, caption.plain, upload_started_at
+            )
+            self.database.mark_published(
+                self.source_key,
+                group.grouped_id,
+                list(receipt.message_ids),
+                receipt.grouped_id,
+                run_date,
+            )
+        finally:
+            self._cleanup(directory)
+
+    async def run_once(self) -> RunSummary:
+        await self.index()
+        run_date = datetime.now(self.config.timezone).date().isoformat()
+        summary = RunSummary(
+            run_date=run_date,
+            published=self.database.published_count(self.source_key, run_date),
+        )
+        attempted_groups: set[int] = set()
+        deadline = time.monotonic() + self.config.max_runtime_hours * 3600
+
+        while (
+            summary.published < self.config.daily_success_count
+            and summary.attempted < self.config.max_candidates_per_run
+            and time.monotonic() < deadline
+        ):
+            group = self.database.next_candidate(
+                self.source_key,
+                run_date,
+                self.config.minimum_source_short_edge,
+                self.config.album_settle_seconds,
+                attempted_groups,
+            )
+            if group is None:
+                break
+            attempted_groups.add(group.grouped_id)
+            if group.status == "uploading":
+                if await self._reconcile(group, run_date):
+                    summary.published += 1
+                    summary.reconciled += 1
+                else:
+                    summary.rejected += 1
+                continue
+
+            summary.attempted += 1
+            self.database.begin_attempt(self.source_key, group.grouped_id, run_date)
+            try:
+                remaining = max(1, deadline - time.monotonic())
+                await asyncio.wait_for(self._process_group(group, run_date), timeout=remaining)
+            except (InvalidSourceMedia, SourceMediaUnavailable) as exc:
+                LOGGER.warning("媒体组 %s 永久无效：%s", group.grouped_id, exc)
+                self.database.mark_failure(
+                    self.source_key, group.grouped_id, str(exc), permanent=True
+                )
+                summary.rejected += 1
+            except Exception as exc:
+                LOGGER.exception("媒体组 %s 处理失败", group.grouped_id)
+                self.database.mark_failure(
+                    self.source_key, group.grouped_id, str(exc), permanent=False
+                )
+                summary.retryable_failures += 1
+            else:
+                summary.published += 1
+
+        message = (
+            f"Telegram 自动运营任务 {summary.run_date}\n"
+            f"成功：{summary.published}/{self.config.daily_success_count}\n"
+            f"本次尝试：{summary.attempted}\n"
+            f"永久跳过：{summary.rejected}\n"
+            f"可重试失败：{summary.retryable_failures}\n"
+            f"恢复确认：{summary.reconciled}"
+        )
+        try:
+            await self.telegram.notify(message)
+        except Exception:
+            LOGGER.exception("发送运行摘要失败")
+        return summary
