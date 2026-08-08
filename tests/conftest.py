@@ -37,6 +37,7 @@ def app_config(tmp_path: Path):
         work_dir=tmp_path / "work",
         max_candidates_per_run=12,
         max_runtime_hours=1,
+        flood_sleep_threshold_seconds=60,
         retry_delays_seconds=(0,),
         notify_saved_messages=False,
     )

@@ -17,6 +17,8 @@ from .models import DeliveryReceipt, MessageSnapshot
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
+DOWNLOAD_REQUEST_SIZE = 512 * 1024
+FLOOD_WAIT_ERRORS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
 
 
 class TelegramError(RuntimeError):
@@ -31,12 +33,16 @@ class TelegramGateway:
     def __init__(self, config: AppConfig, client: TelegramClient | None = None):
         self.config = config
         config.session_path.parent.mkdir(parents=True, exist_ok=True)
-        self.client = client or TelegramClient(
-            str(config.session_path),
-            config.api_id,
-            config.api_hash,
-            flood_sleep_threshold=0,
-        )
+        if client is None:
+            self.client = TelegramClient(
+                str(config.session_path),
+                config.api_id,
+                config.api_hash,
+                flood_sleep_threshold=config.flood_sleep_threshold_seconds,
+            )
+        else:
+            self.client = client
+            self.client.flood_sleep_threshold = config.flood_sleep_threshold_seconds
         self._source: Any = None
         self._target: Any = None
 
@@ -125,25 +131,103 @@ class TelegramGateway:
             )
 
     async def _retry(self, operation: Callable[[], Awaitable[T]], description: str) -> T:
-        delays = (0, *self.config.retry_delays_seconds)
+        attempts = len(self.config.retry_delays_seconds) + 1
         last_error: Exception | None = None
-        for index, delay in enumerate(delays):
-            if delay:
-                await asyncio.sleep(delay)
+        for index in range(attempts):
             try:
                 return await operation()
-            except errors.FloodWaitError as exc:
+            except FLOOD_WAIT_ERRORS as exc:
                 last_error = exc
-                LOGGER.warning("%s 触发 FloodWait，等待 %s 秒", description, exc.seconds)
-                await asyncio.sleep(max(1, exc.seconds))
-                try:
-                    return await operation()
-                except errors.FloodWaitError as repeated:
-                    last_error = repeated
-            except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
+                LOGGER.warning(
+                    "%s 触发 %s，等待 %s 秒后从断点继续",
+                    description,
+                    type(exc).__name__,
+                    exc.seconds,
+                )
+                if index + 1 < attempts:
+                    await asyncio.sleep(max(1, exc.seconds))
+            except (
+                TimeoutError,
+                errors.TimedOutError,
+                errors.ServerError,
+                errors.RpcCallFailError,
+                errors.FileReferenceExpiredError,
+                errors.FilerefUpgradeNeededError,
+                OSError,
+            ) as exc:
                 last_error = exc
                 LOGGER.warning("%s 第 %s 次尝试失败：%s", description, index + 1, exc)
+                if index + 1 < attempts:
+                    delay = self.config.retry_delays_seconds[index]
+                    if delay:
+                        await asyncio.sleep(delay)
         raise TelegramError(f"{description} 重试耗尽：{last_error}") from last_error
+
+    async def _download_message(
+        self, message: Any, message_id: int, destination: Path
+    ) -> Path:
+        document = getattr(message, "document", None)
+        expected_size = int(getattr(document, "size", 0) or 0)
+        if expected_size <= 0:
+            raise SourceMediaUnavailable(f"源消息 {message_id} 缺少有效文件大小")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_name(f"{destination.name}.part")
+        if destination.exists():
+            if destination.stat().st_size == expected_size:
+                return destination
+            destination.unlink()
+
+        partial_size = partial.stat().st_size if partial.exists() else 0
+        if partial_size > expected_size:
+            LOGGER.warning(
+                "下载消息 %s 的临时文件大于源文件，放弃旧断点并重新开始", message_id
+            )
+            partial.unlink()
+            partial_size = 0
+
+        offset = partial_size - (partial_size % DOWNLOAD_REQUEST_SIZE)
+        if offset != partial_size:
+            LOGGER.info(
+                "下载消息 %s 将未对齐断点从 %s 回退到 %s 字节",
+                message_id,
+                partial_size,
+                offset,
+            )
+
+        mode = "r+b" if partial.exists() else "w+b"
+        with partial.open(mode) as handle:
+            handle.truncate(offset)
+            handle.seek(offset)
+            if offset:
+                LOGGER.info(
+                    "下载消息 %s 从 %s/%s 字节继续",
+                    message_id,
+                    offset,
+                    expected_size,
+                )
+            async for chunk in self.client.iter_download(
+                message,
+                offset=offset,
+                request_size=DOWNLOAD_REQUEST_SIZE,
+                chunk_size=DOWNLOAD_REQUEST_SIZE,
+                file_size=expected_size,
+            ):
+                written = handle.write(chunk)
+                if written != len(chunk):
+                    raise OSError(
+                        f"写入下载临时文件不完整：预期 {len(chunk)} 字节，实际 {written} 字节"
+                    )
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        actual_size = partial.stat().st_size
+        if actual_size != expected_size:
+            raise OSError(
+                f"下载文件大小不匹配：预期 {expected_size} 字节，实际 {actual_size} 字节"
+            )
+        partial.replace(destination)
+        return destination
 
     async def download_video(self, message_id: int, destination: Path) -> Path:
         source = await self._source_entity()
@@ -152,10 +236,7 @@ class TelegramGateway:
             message = await self.client.get_messages(source, ids=message_id)
             if message is None or not self._video_metadata(message)[0]:
                 raise SourceMediaUnavailable(f"源消息 {message_id} 不再包含有效视频")
-            result = await self.client.download_media(message, file=str(destination))
-            if not result:
-                raise TelegramError(f"下载源消息 {message_id} 未返回文件路径")
-            return Path(result)
+            return await self._download_message(message, message_id, destination)
 
         return await self._retry(operation, f"下载消息 {message_id}")
 
@@ -188,9 +269,13 @@ class TelegramGateway:
             try:
                 result = await operation()
                 break
-            except errors.FloodWaitError as exc:
+            except FLOOD_WAIT_ERRORS as exc:
                 last_error = exc
-                LOGGER.warning("发送目标媒体组触发 FloodWait，等待 %s 秒", exc.seconds)
+                LOGGER.warning(
+                    "发送目标媒体组触发 %s，等待 %s 秒",
+                    type(exc).__name__,
+                    exc.seconds,
+                )
                 await asyncio.sleep(max(1, exc.seconds))
             except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
                 last_error = exc
