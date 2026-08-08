@@ -120,8 +120,6 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
 
     keep_tags = tuple(str(tag).strip() for tag in content.get("keep_tags", []))
     drop_tags = tuple(str(tag).strip() for tag in content.get("drop_tags", []))
-    if len(keep_tags) > 5:
-        raise ConfigError("keep_tags 最多只能配置 5 个")
     keep_keys = {_tag_key(tag) for tag in keep_tags if tag}
     drop_keys = {_tag_key(tag) for tag in drop_tags if tag}
     overlap = keep_keys & drop_keys

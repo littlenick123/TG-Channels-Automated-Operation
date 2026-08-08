@@ -10,6 +10,7 @@ from .models import CaptionResult
 
 HASHTAG_RE = re.compile(r"(?<!\w)#[\w]+", re.UNICODE)
 INTRO_RE = re.compile(r"^\s*简介\s*[:：]\s*(.*?)\s*$")
+TAG_LINE_RE = re.compile(r"^\s*标签\s*[:：]\s*(.*?)\s*$")
 
 
 def normalize_tag(tag: str) -> str:
@@ -38,11 +39,16 @@ def _truncate_utf16(value: str, limit: int) -> str:
 
 
 def _source_tags(text: str) -> list[str]:
-    tag_line = next((line for line in text.splitlines() if line.lstrip().startswith("#")), "")
     unique: dict[str, str] = {}
-    for match in HASHTAG_RE.finditer(tag_line):
-        tag = match.group(0)
-        unique.setdefault(normalize_tag(tag), tag)
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        labelled = TAG_LINE_RE.match(line)
+        if not stripped.startswith("#") and labelled is None:
+            continue
+        content = labelled.group(1) if labelled is not None else stripped
+        for match in HASHTAG_RE.finditer(content):
+            tag = match.group(0)
+            unique.setdefault(normalize_tag(tag), tag)
     return list(unique.values())
 
 

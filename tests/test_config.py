@@ -36,6 +36,23 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.database_path == (tmp_path / "data/state.db").resolve()
 
 
+def test_keep_tags_accepts_large_priority_library(tmp_path: Path, monkeypatch):
+    tags = ", ".join(f'"#标签{index}"' for index in range(50))
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace('keep_tags = ["#保留"]', f"keep_tags = [{tags}]"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+
+    config = load_config(path)
+
+    assert len(config.keep_tags) == 50
+    assert config.keep_tags[0] == "#标签0"
+    assert config.keep_tags[-1] == "#标签49"
+
+
 def test_overlapping_tag_lists_fail_fast(tmp_path: Path, monkeypatch):
     path = tmp_path / "config.toml"
     path.write_text(BASE_CONFIG.replace("#删除", "保留"), encoding="utf-8")
