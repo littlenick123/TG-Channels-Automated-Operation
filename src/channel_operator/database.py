@@ -279,7 +279,9 @@ class StateDatabase:
         rows = self.connection.execute(
             """
             SELECT * FROM media_groups
-            WHERE source_channel = ? AND status != 'published'
+            WHERE source_channel = ?
+              AND status IN ('indexed', 'selected', 'retryable', 'downloading',
+                             'transcoding', 'uploading')
               AND video_count = 1 AND MIN(width, height) >= ? AND newest_message_at <= ?
             ORDER BY RANDOM() LIMIT ?
             """,

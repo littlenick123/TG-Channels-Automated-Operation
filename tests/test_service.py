@@ -10,17 +10,20 @@ from channel_operator.service import AutomationService
 
 
 class FakeTelegram:
-    def __init__(self, snapshot: MessageSnapshot):
-        self.snapshot = snapshot
+    def __init__(self, snapshots: MessageSnapshot | list[MessageSnapshot]):
+        self.snapshots = snapshots if isinstance(snapshots, list) else [snapshots]
         self.sent_files = None
         self.sent_caption = None
         self.notifications = []
+        self.downloaded_message_ids = []
 
     async def scan_messages(self, min_id):
-        if self.snapshot.message_id > min_id:
-            yield self.snapshot
+        for snapshot in self.snapshots:
+            if snapshot.message_id > min_id:
+                yield snapshot
 
     async def download_video(self, message_id, destination):
+        self.downloaded_message_ids.append(message_id)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"source")
         return destination
@@ -89,4 +92,88 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
     assert telegram.sent_caption.startswith("#必留")
     assert list(config.work_dir.iterdir()) == []
     assert database.published_count(str(config.source_channel), summary.run_date) == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_caption_is_rejected_before_download_and_replaced(app_config):
+    config = app_config(daily_success_count=1)
+    published_at = datetime.now(UTC) - timedelta(hours=1)
+    empty = MessageSnapshot(
+        message_id=1,
+        grouped_id=111,
+        caption="演员：没有标签也没有简介",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+    replacement = MessageSnapshot(
+        message_id=2,
+        grouped_id=222,
+        caption="标签：#有效标签\n简介：替补简介",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+    database = StateDatabase(config.database_path)
+    database.save_messages(str(config.source_channel), [empty, replacement], 2)
+    database.refresh_groups(str(config.source_channel))
+    database.begin_attempt(str(config.source_channel), empty.grouped_id, "2026-08-09")
+    telegram = FakeTelegram([empty, replacement])
+    service = AutomationService(config, database, telegram, FakeMedia(config))
+
+    summary = await service.run_once()
+
+    assert summary.published == 1
+    assert summary.rejected == 1
+    assert telegram.downloaded_message_ids == [replacement.message_id]
+    assert database.counts(str(config.source_channel))["rejected"] == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_dry_run_filters_empty_caption_and_returns_replacement(app_config):
+    config = app_config(daily_success_count=1)
+    published_at = datetime.now(UTC) - timedelta(hours=1)
+    snapshots = [
+        MessageSnapshot(
+            message_id=1,
+            grouped_id=111,
+            caption="其他：空文案",
+            is_video=True,
+            is_photo=False,
+            width=1920,
+            height=1080,
+            duration=180,
+            file_size=100,
+            published_at=published_at,
+        ),
+        MessageSnapshot(
+            message_id=2,
+            grouped_id=222,
+            caption="标签：#有效\n简介：内容",
+            is_video=True,
+            is_photo=False,
+            width=1920,
+            height=1080,
+            duration=180,
+            file_size=100,
+            published_at=published_at,
+        ),
+    ]
+    database = StateDatabase(config.database_path)
+    service = AutomationService(config, database, FakeTelegram(snapshots), FakeMedia(config))
+
+    previews = await service.dry_run()
+
+    assert previews == [(222, "#有效\n\n内容")]
+    assert "rejected" not in database.counts(str(config.source_channel))
     database.close()

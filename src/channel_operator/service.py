@@ -12,7 +12,7 @@ from .captions import build_caption
 from .config import AppConfig
 from .database import StateDatabase
 from .media import InvalidSourceMedia, MediaProcessor
-from .models import MediaGroup, RunSummary
+from .models import CaptionResult, MediaGroup, RunSummary
 from .telegram import SourceMediaUnavailable, TelegramGateway
 
 LOGGER = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class AutomationService:
             self.source_key,
             self.config.minimum_source_short_edge,
             self.config.album_settle_seconds,
-            self.config.daily_success_count,
+            self.config.max_candidates_per_run,
         )
         previews = []
         for candidate in candidates:
@@ -67,7 +67,12 @@ class AutomationService:
                 self.config.drop_tags,
                 limit=self.config.caption_limit,
             )
+            if not caption.plain.strip():
+                LOGGER.info("预览跳过空文案媒体组 %s", candidate.grouped_id)
+                continue
             previews.append((candidate.grouped_id, caption.plain))
+            if len(previews) >= self.config.daily_success_count:
+                break
         return previews
 
     def _work_directory(self, group: MediaGroup) -> Path:
@@ -108,7 +113,9 @@ class AutomationService:
         )
         return True
 
-    async def _process_group(self, group: MediaGroup, run_date: str) -> None:
+    async def _process_group(
+        self, group: MediaGroup, run_date: str, caption: CaptionResult
+    ) -> None:
         directory = self._work_directory(group)
         directory.mkdir(parents=True, exist_ok=False)
         try:
@@ -125,12 +132,6 @@ class AutomationService:
             output_info = await self.media.transcode(source, output, source_info)
             frames = await self.media.screenshots(output, output_info.duration, directory)
 
-            caption = build_caption(
-                group.caption,
-                self.config.keep_tags,
-                self.config.drop_tags,
-                limit=self.config.caption_limit,
-            )
             upload_started_at = self.database.begin_upload(
                 self.source_key, group.grouped_id, caption.html, caption.plain
             )
@@ -182,9 +183,25 @@ class AutomationService:
 
             summary.attempted += 1
             self.database.begin_attempt(self.source_key, group.grouped_id, run_date)
+            caption = build_caption(
+                group.caption,
+                self.config.keep_tags,
+                self.config.drop_tags,
+                limit=self.config.caption_limit,
+            )
+            if not caption.plain.strip():
+                reason = "标签过滤后没有标签，且未找到有效简介，处理后文案为空"
+                LOGGER.warning("媒体组 %s 文案为空，已跳过并选择替补", group.grouped_id)
+                self.database.mark_failure(
+                    self.source_key, group.grouped_id, reason, permanent=True
+                )
+                summary.rejected += 1
+                continue
             try:
                 remaining = max(1, deadline - time.monotonic())
-                await asyncio.wait_for(self._process_group(group, run_date), timeout=remaining)
+                await asyncio.wait_for(
+                    self._process_group(group, run_date, caption), timeout=remaining
+                )
             except (InvalidSourceMedia, SourceMediaUnavailable) as exc:
                 LOGGER.warning("媒体组 %s 永久无效：%s", group.grouped_id, exc)
                 self.database.mark_failure(
