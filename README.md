@@ -929,19 +929,47 @@ channel_b.db-shm
 
 下面的 VPS 命令假定当前直接使用 root。
 
-### 1. 安装并检查 Docker
-
-安装 Docker Engine 和 Docker Compose plugin 后确认：
+### 1. 安装 Docker
 
 ```bash
-docker --version
-docker compose version
-docker info
-```
+for pkg in \
+  docker.io \
+  docker-doc \
+  docker-compose \
+  docker-compose-v2 \
+  docker-buildx \
+  podman-docker \
+  containerd \
+  runc
+do
+  dpkg -s "$pkg" >/dev/null 2>&1 && apt remove -y "$pkg"
+done
 
-应使用 `docker compose`，而不是已经停止维护的旧命令 `docker-compose`。Docker 服务需要处于运行状态：
+apt update
+apt install -y ca-certificates curl
 
-```bash
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+apt update
+apt install -y \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin
+
 systemctl enable --now docker
 ```
 
@@ -1203,40 +1231,6 @@ docker compose down
 
 `docker compose down` 不会删除 bind mount 中的 `data/`、`work/`、`config.toml` 和 `.env`。不要手工删除 `data/`，否则会丢失 Session、索引和防重复发布记录。
 
-### 12. 从旧 systemd 部署切换
-
-先停用旧定时器，避免 systemd 与 Docker 在同一时刻启动两个任务：
-
-```bash
-systemctl disable --now channel-operator.timer
-systemctl stop channel-operator.service
-```
-
-如果旧版已经使用当前项目根目录下的 `config.toml`、`.env`、`data/` 和 `work/`，无需迁移数据，直接构建并启动 Docker。
-
-如果旧数据仍位于 `/var/lib/channel-operator`，旧配置仍位于 `/etc/channel-operator`，先在 Docker 尚未启动时复制，并且不覆盖已经存在的文件：
-
-```bash
-cd /opt/telegram/TG-Channels-Automated-Operation
-mkdir -p data work
-
-if [ ! -f config.toml ] && [ -f /etc/channel-operator/config.toml ]; then
-  cp -a /etc/channel-operator/config.toml config.toml
-fi
-if [ ! -f .env ] && [ -f /etc/channel-operator/.env ]; then
-  cp -a /etc/channel-operator/.env .env
-fi
-if [ -d /var/lib/channel-operator ]; then
-  cp -a -n /var/lib/channel-operator/. data/
-fi
-
-chmod 600 config.toml .env
-chmod 700 data work
-```
-
-随后把 `TG_SESSION_PATH`、`database_dir`、`work_dir` 分别改成 `./data/telegram-user`、`./data`、`./work`。通过登录检查、`doctor` 和 dry-run 后再启动 Compose。确认 Docker 至少完成一次正式任务之前，保留旧目录作为回退副本。
-
-旧 unit 文件留在 `/etc/systemd/system` 不会占用资源，只要 timer 已经 disabled。确认不再回退 systemd 后可以自行删除。
 
 ## 更新源码和升级
 
