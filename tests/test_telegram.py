@@ -60,6 +60,8 @@ class ResumableDownloadClient(FakeClient):
         message,
         *,
         offset,
+        stride,
+        limit,
         request_size,
         chunk_size,
         file_size,
@@ -68,6 +70,8 @@ class ResumableDownloadClient(FakeClient):
         self.download_calls.append(
             {
                 "offset": offset,
+                "stride": stride,
+                "limit": limit,
                 "request_size": request_size,
                 "chunk_size": chunk_size,
                 "file_size": file_size,
@@ -76,12 +80,14 @@ class ResumableDownloadClient(FakeClient):
 
         async def stream():
             position = offset
-            while position < len(self.data):
-                if call_number == 1 and position >= request_size:
+            for index in range(limit):
+                if call_number == 1 and index >= 1:
                     raise OSError("simulated interrupted download")
+                if position >= len(self.data):
+                    return
                 end = min(position + chunk_size, len(self.data))
                 yield self.data[position:end]
-                position = end
+                position += stride
 
         return stream()
 
@@ -176,10 +182,21 @@ async def test_ambiguous_send_checks_target_before_retrying(app_config, tmp_path
 @pytest.mark.asyncio
 async def test_download_resumes_partial_file_after_network_error(app_config, tmp_path: Path):
     request_size = 512 * 1024
-    data = b"a" * request_size + b"b" * request_size + b"tail"
+    data = (
+        b"a" * request_size
+        + b"b" * request_size
+        + b"c" * request_size
+        + b"d" * request_size
+        + b"e" * request_size
+        + b"tail"
+    )
     client = ResumableDownloadClient(data)
     gateway = ResumableGateway(
-        app_config(retry_delays_seconds=(0,), flood_sleep_threshold_seconds=60),
+        app_config(
+            retry_delays_seconds=(0,),
+            download_concurrency=2,
+            flood_sleep_threshold_seconds=60,
+        ),
         client=client,
     )
     destination = tmp_path / "source_video.mp4"
@@ -189,7 +206,13 @@ async def test_download_resumes_partial_file_after_network_error(app_config, tmp
     assert result == destination
     assert destination.read_bytes() == data
     assert not destination.with_name("source_video.mp4.part").exists()
-    assert [call["offset"] for call in client.download_calls] == [0, request_size]
+    assert [call["offset"] for call in client.download_calls] == [
+        0,
+        request_size,
+        request_size * 2,
+        request_size * 3,
+    ]
     assert all(call["request_size"] == request_size for call in client.download_calls)
+    assert all(call["stride"] == request_size * 2 for call in client.download_calls)
     assert all(call["file_size"] == len(data) for call in client.download_calls)
     assert client.flood_sleep_threshold == 60

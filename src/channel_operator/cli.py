@@ -53,6 +53,7 @@ async def _run(arguments: argparse.Namespace) -> int:
                 print(f"{name}: {value}")
             print(f"database: {config.database_path}")
             print(f"work_dir: {config.work_dir}")
+            print(f"download_concurrency: {config.download_concurrency}")
             return 0
 
         lock_path = config.database_path.with_suffix(config.database_path.suffix + ".lock")

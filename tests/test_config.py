@@ -34,6 +34,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.keep_tags == ("#保留",)
     assert config.daily_time == "00:01"
     assert config.database_path == (tmp_path / "data/state.db").resolve()
+    assert config.download_concurrency == 4
     assert config.flood_sleep_threshold_seconds == 60
 
 
@@ -77,4 +78,23 @@ def test_flood_sleep_threshold_must_be_positive(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TG_API_HASH", "hash")
 
     with pytest.raises(ConfigError, match="flood_sleep_threshold_seconds"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0, 9])
+def test_download_concurrency_must_be_between_one_and_eight(
+    value: int, tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'work_dir = "./work"',
+            f'work_dir = "./work"\ndownload_concurrency = {value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+
+    with pytest.raises(ConfigError, match="download_concurrency"):
         load_config(path)

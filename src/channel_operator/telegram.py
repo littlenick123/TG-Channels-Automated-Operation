@@ -168,6 +168,13 @@ class TelegramGateway:
                         await asyncio.sleep(delay)
         raise TelegramError(f"{description} 重试耗尽：{last_error}") from last_error
 
+    @staticmethod
+    async def _next_download_chunk(stream: Any) -> bytes | memoryview:
+        try:
+            return await stream.__anext__()
+        except StopAsyncIteration as exc:
+            raise OSError("Telegram 下载流在到达预期文件末尾前结束") from exc
+
     async def _download_message(
         self, message: Any, message_id: int, destination: Path
     ) -> Path:
@@ -211,18 +218,85 @@ class TelegramGateway:
                     offset,
                     expected_size,
                 )
-            async for chunk in self.client.iter_download(
-                message,
-                offset=offset,
-                request_size=DOWNLOAD_REQUEST_SIZE,
-                chunk_size=DOWNLOAD_REQUEST_SIZE,
-                file_size=expected_size,
-            ):
-                written = handle.write(chunk)
-                if written != len(chunk):
-                    raise OSError(
-                        f"写入下载临时文件不完整：预期 {len(chunk)} 字节，实际 {written} 字节"
+            remaining_chunks = (
+                expected_size - offset + DOWNLOAD_REQUEST_SIZE - 1
+            ) // DOWNLOAD_REQUEST_SIZE
+            concurrency = min(self.config.download_concurrency, remaining_chunks)
+            stride = concurrency * DOWNLOAD_REQUEST_SIZE
+            streams: list[Any] = []
+            if concurrency:
+                LOGGER.info(
+                    "下载消息 %s 使用 %s 路并发，分片大小 %s 字节",
+                    message_id,
+                    concurrency,
+                    DOWNLOAD_REQUEST_SIZE,
+                )
+                for lane in range(concurrency):
+                    stream_offset = offset + lane * DOWNLOAD_REQUEST_SIZE
+                    limit = (expected_size - stream_offset + stride - 1) // stride
+                    streams.append(
+                        self.client.iter_download(
+                            message,
+                            offset=stream_offset,
+                            stride=stride,
+                            limit=limit,
+                            request_size=DOWNLOAD_REQUEST_SIZE,
+                            chunk_size=DOWNLOAD_REQUEST_SIZE,
+                            file_size=expected_size,
+                        )
                     )
+
+            try:
+                while offset < expected_size:
+                    remaining_chunks = (
+                        expected_size - offset + DOWNLOAD_REQUEST_SIZE - 1
+                    ) // DOWNLOAD_REQUEST_SIZE
+                    active_streams = streams[: min(len(streams), remaining_chunks)]
+                    tasks = [
+                        asyncio.create_task(self._next_download_chunk(stream))
+                        for stream in active_streams
+                    ]
+                    try:
+                        chunks = await asyncio.gather(*tasks)
+                    except BaseException:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        raise
+
+                    for chunk in chunks:
+                        expected_chunk_size = min(
+                            DOWNLOAD_REQUEST_SIZE, expected_size - offset
+                        )
+                        if len(chunk) != expected_chunk_size:
+                            raise OSError(
+                                "下载分片大小不匹配："
+                                f"偏移 {offset}，预期 {expected_chunk_size} 字节，"
+                                f"实际 {len(chunk)} 字节"
+                            )
+                        written = handle.write(chunk)
+                        if written != len(chunk):
+                            raise OSError(
+                                "写入下载临时文件不完整："
+                                f"预期 {len(chunk)} 字节，实际 {written} 字节"
+                            )
+                        offset += written
+            finally:
+                close_tasks = []
+                for stream in streams:
+                    close = getattr(stream, "close", None) or getattr(
+                        stream, "aclose", None
+                    )
+                    if close is not None:
+                        close_tasks.append(close())
+                if close_tasks:
+                    close_results = await asyncio.gather(
+                        *close_tasks, return_exceptions=True
+                    )
+                    for result in close_results:
+                        if isinstance(result, BaseException):
+                            LOGGER.debug("关闭 Telegram 下载流失败：%s", result)
             handle.flush()
             os.fsync(handle.fileno())
 

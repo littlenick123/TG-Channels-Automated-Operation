@@ -87,6 +87,7 @@ TG_SESSION_PATH=./data/telegram-user
 - 长视频截图时间为 20 秒、中点和结束前 60 秒；不超过 120 秒时改用 10%、50%、90%。
 - 视频封面从转码成品的第 0 帧单独生成，不复用三张内容截图；封面会缩放为最长边不超过 320 像素、文件不超过 20 KiB 的 JPEG。
 - 上传视频时显式携带 FFprobe 得到的宽度、高度和时长，并通过 `hachoir` 提供媒体元数据兼容支持，避免 Telegram 按错误比例渲染未播放预览。
+- 单个视频默认使用 4 路交错分片并发下载，每路分片为 512 KiB；可通过 `[runtime] download_concurrency` 在 1 到 8 之间调整。媒体组之间仍然串行处理，不会同时转码或发布多个媒体组。
 - 60 秒以内的 FloodWait 默认由 Telethon 在当前请求内自动等待；更长等待和网络错误会保留 `.part` 临时文件，并从已完成的 512 KiB 边界续传，不会重新从第 0 字节下载。
 - 日志会显示 `FloodWaitError` 或 `FloodPremiumWaitError` 的真实类型，便于区分普通频率限制与非会员下载限速；自动等待阈值可通过 `[runtime] flood_sleep_threshold_seconds` 调整。
 - 上传响应丢失时，程序先到目标频道核对相册，再决定是否重试，减少重复发帖风险。

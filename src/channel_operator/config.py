@@ -83,6 +83,7 @@ class AppConfig:
     work_dir: Path
     max_candidates_per_run: int
     max_runtime_hours: float
+    download_concurrency: int
     flood_sleep_threshold_seconds: int
     retry_delays_seconds: tuple[int, ...]
     notify_saved_messages: bool
@@ -167,6 +168,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         work_dir=_resolve_path(base, str(runtime.get("work_dir", "./work"))),
         max_candidates_per_run=int(runtime.get("max_candidates_per_run", 12)),
         max_runtime_hours=float(runtime.get("max_runtime_hours", 6)),
+        download_concurrency=int(runtime.get("download_concurrency", 4)),
         flood_sleep_threshold_seconds=int(
             runtime.get("flood_sleep_threshold_seconds", 60)
         ),
@@ -183,6 +185,8 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("CRF 必须在 0 到 51 之间")
     if config.caption_limit < 1:
         raise ConfigError("caption_limit 必须大于 0")
+    if not 1 <= config.download_concurrency <= 8:
+        raise ConfigError("download_concurrency 必须在 1 到 8 之间")
     if not 1 <= config.flood_sleep_threshold_seconds <= 86_400:
         raise ConfigError("flood_sleep_threshold_seconds 必须在 1 到 86400 秒之间")
     return config
