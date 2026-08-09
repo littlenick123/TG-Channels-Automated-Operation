@@ -22,14 +22,14 @@
 - [处理流程与输出格式](#处理流程与输出格式)
 - [运行条件](#运行条件)
 - [准备 Telegram 账号和报告机器人](#准备-telegram-账号和报告机器人)
-- [快速安装](#快速安装)
+- [本地源码运行（可选）](#本地源码运行可选)
 - [.env 完整说明](#env-完整说明)
 - [config.toml 完整说明](#configtoml-完整说明)
 - [五个目标频道的完整配置示例](#五个目标频道的完整配置示例)
 - [命令行完整说明](#命令行完整说明)
 - [首次运行顺序](#首次运行顺序)
 - [多频道串行、数据库和失败处理](#多频道串行数据库和失败处理)
-- [systemd 生产部署](#systemd-生产部署)
+- [Docker 生产部署](#docker-生产部署)
 - [更新源码和升级](#更新源码和升级)
 - [日志与故障排查](#日志与故障排查)
 - [安全建议](#安全建议)
@@ -90,8 +90,7 @@
 推荐环境：
 
 - Ubuntu 24.04 LTS。
-- Python 3.12。
-- FFmpeg 和 FFprobe 6 或更高版本。
+- Docker Engine 和 Docker Compose plugin。
 - 4 核 CPU、6 GiB 或更多内存。
 - 足够容纳源视频、转码视频和临时文件的磁盘空间。
 - 能稳定访问 Telegram MTProto 和 `api.telegram.org` 的网络。
@@ -99,6 +98,8 @@
 - 该用户账号在所有目标频道中具有发帖权限。
 - 从 [my.telegram.org](https://my.telegram.org/) 获取的 `api_id` 和 `api_hash`。
 - 一个由 BotFather 创建的报告机器人。
+
+生产镜像已经包含 Python 3.12、FFmpeg、FFprobe 和全部 Python 依赖，宿主机不需要另外安装这些组件。只有选择不使用 Docker、直接从源码运行时，才需要宿主机提供 Python 3.12 和 FFmpeg/FFprobe 5.1 或更高版本。
 
 程序处理媒体前要求可用磁盘至少为：
 
@@ -159,9 +160,9 @@ curl -sS -X POST "https://api.telegram.org/bot${TG_REPORT_BOT_TOKEN}/getUpdates"
 - 报告机器人不需要加入源频道或目标频道。
 - 频道 ID 通常是以 `-100` 开头的负整数，也可以使用公开频道用户名。
 
-## 快速安装
+## 本地源码运行（可选）
 
-以下命令适合已经把项目放到 VPS 某个目录后手工测试。进入实际项目目录，例如：
+本节只用于开发调试或暂时不使用 Docker 的环境；生产部署请直接阅读后面的 Docker 章节。以下命令假定当前使用 root，先进入实际项目目录：
 
 ```bash
 cd /opt/telegram/TG-Channels-Automated-Operation
@@ -170,8 +171,8 @@ cd /opt/telegram/TG-Channels-Automated-Operation
 安装系统依赖：
 
 ```bash
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv ffmpeg git curl
+apt update
+apt install -y python3.12 python3.12-venv ffmpeg git curl
 ```
 
 确认版本：
@@ -209,7 +210,7 @@ nano config.toml
 
 ## `.env` 完整说明
 
-`.env` 必须与传给 `--config` 的配置文件位于同一个目录。例如使用 `--config /etc/channel-operator/config.toml` 时，程序读取 `/etc/channel-operator/.env`。
+`.env` 必须与传给 `--config` 的配置文件位于同一个目录。统一部署时，`config.toml` 和 `.env` 都放在 `/opt/telegram/TG-Channels-Automated-Operation/`。
 
 完整示例：
 
@@ -217,8 +218,9 @@ nano config.toml
 TG_API_ID=123456
 TG_API_HASH=0123456789abcdef0123456789abcdef
 TG_PHONE=+8613800000000
-TG_SESSION_PATH=/var/lib/channel-operator/telegram-user
+TG_SESSION_PATH=./data/telegram-user
 TG_REPORT_BOT_TOKEN=123456:ABCDEF_replace_me
+TZ=Asia/Shanghai
 ```
 
 字段说明：
@@ -228,8 +230,9 @@ TG_REPORT_BOT_TOKEN=123456:ABCDEF_replace_me
 | `TG_API_ID` | 是 | `123456` | 从 my.telegram.org 获取的整数 API ID。 |
 | `TG_API_HASH` | 是 | `0123...cdef` | 从 my.telegram.org 获取的 API Hash，属于敏感凭据。 |
 | `TG_PHONE` | 登录时建议 | `+8613800000000` | Telegram 用户账号手机号，使用带国家区号的 E.164 格式。 |
-| `TG_SESSION_PATH` | 建议显式设置 | `/var/lib/channel-operator/telegram-user` | Telethon 用户会话路径；省略时默认使用配置文件目录下的 `./data/telegram-user`。通常不要手工添加 `.session` 后缀，父目录必须可写。 |
+| `TG_SESSION_PATH` | 建议显式设置 | `./data/telegram-user` | Telethon 用户会话路径；相对路径以 `config.toml` 所在目录为基准。通常不要手工添加 `.session` 后缀，父目录必须可写。 |
 | `TG_REPORT_BOT_TOKEN` | 是 | `123456:ABC...` | BotFather 提供的报告机器人 Token。 |
+| `TZ` | Docker 建议 | `Asia/Shanghai` | 设置容器日志时区；建议与 `[schedule] timezone` 保持一致。任务触发时间仍以 TOML 为准。 |
 
 注意事项：
 
@@ -309,9 +312,9 @@ daily_time = "00:01"
 #### `daily_time`
 
 - 必须使用 24 小时制 `HH:MM` 格式。
-- 这个字段用于记录预期运行时间，但程序自身不会常驻并等待该时间。
-- 真正的自动触发时间由 systemd timer 的 `OnCalendar` 决定。
-- 修改运行时间时，必须同时修改 `daily_time` 和 timer 的 `OnCalendar`。
+- Docker 中的 `schedule` 常驻命令会按这个时间自动运行，不需要另外配置 cron 或 systemd timer。
+- 容器在当天计划时间之前启动时会等待到点；在计划时间之后启动时会立即补跑一次。
+- 修改时间或时区后执行 `docker compose restart channel-operator`，让常驻调度器重新读取配置。
 
 ### `[reporting]` 机器人报告
 
@@ -383,8 +386,8 @@ disk_reserve_bytes = 1073741824
 
 ```toml
 [runtime]
-database_dir = "/var/lib/channel-operator"
-work_dir = "/var/cache/channel-operator/work"
+database_dir = "./data"
+work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
@@ -397,7 +400,7 @@ retry_delays_seconds = [30, 120, 600]
 - 所有频道组 SQLite 数据库的统一保存目录。
 - 默认值为 `./data`；相对路径以 `config.toml` 所在目录为基准。
 - 数据库文件名不再手工配置，而是自动使用 `<频道组名称>.db`。
-- 例如 `database_dir = "/var/lib/channel-operator"` 且组名为 `channel_b`，实际数据库为 `/var/lib/channel-operator/channel_b.db`。
+- 例如统一部署目录中使用 `database_dir = "./data"` 且组名为 `channel_b`，实际数据库为 `/opt/telegram/TG-Channels-Automated-Operation/data/channel_b.db`。
 - 生产环境运行用户必须拥有该目录的读写权限。
 
 #### `work_dir`
@@ -462,8 +465,8 @@ daily_success_count = 4
 不允许再在 `[[channel_groups]]` 中配置 `database_path`。每个组的 `name` 必须唯一，程序会在全局 `database_dir` 下自动创建同名数据库。例如：
 
 ```text
-channel_b → /var/lib/channel-operator/channel_b.db
-channel_c → /var/lib/channel-operator/channel_c.db
+channel_b → ./data/channel_b.db
+channel_c → ./data/channel_c.db
 ```
 
 频道组的书写顺序就是运行顺序。以下配置一定先完成 `channel_b`，再开始 `channel_c`：
@@ -521,8 +524,8 @@ album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
 
 [runtime]
-database_dir = "/var/lib/channel-operator"
-work_dir = "/var/cache/channel-operator/work"
+database_dir = "./data"
+work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
@@ -594,8 +597,8 @@ F：1 组
 生产环境示例：
 
 ```bash
-/opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml doctor
+docker compose run --rm channel-operator \
+  --config /app/config.toml doctor
 ```
 
 如果省略，默认读取当前目录的 `config.toml`。
@@ -718,6 +721,22 @@ dry-run 不会：
 
 程序会先检查当前组当天已经成功发布多少组，再补足到 `daily_success_count`。全部频道组结束后，报告机器人发送统一摘要。
 
+### `schedule`
+
+常驻运行，并按照 `[schedule]` 中的 `timezone` 和 `daily_time` 每天调用一次完整 `run-once`：
+
+```bash
+.venv/bin/channel-operator --config config.toml schedule
+```
+
+Docker 镜像默认执行这个命令。行为如下：
+
+- 启动时间早于当天计划时间：等待到计划时间执行。
+- 启动时间晚于或等于当天计划时间：立即补跑一次。
+- 一次任务完成或部分频道组失败后：调度器保持运行，等待下一天。
+- 容器重启后即使再次触发当天任务，SQLite 每日计数也只会补足差额，不会重复发布已经成功的素材。
+- 修改 `config.toml` 的运行时间后需要重启常驻进程。
+
 ### 退出码
 
 | 退出码 | 含义 |
@@ -737,18 +756,20 @@ echo $?
 
 建议严格按以下顺序执行。
 
-### 1. 检查配置语法但暂不启动 systemd
+### 1. 检查配置语法但暂不启动常驻容器
 
 确保 `.env` 和 `config.toml` 已填写，然后登录：
 
 ```bash
-.venv/bin/channel-operator --config config.toml login
+docker compose run --rm channel-operator \
+  --config /app/config.toml login
 ```
 
 ### 2. 执行 doctor
 
 ```bash
-.venv/bin/channel-operator --config config.toml doctor
+docker compose run --rm channel-operator \
+  --config /app/config.toml doctor
 ```
 
 确认：
@@ -761,7 +782,8 @@ echo $?
 ### 3. 建立索引
 
 ```bash
-.venv/bin/channel-operator --config config.toml index
+docker compose run --rm channel-operator \
+  --config /app/config.toml index
 ```
 
 首次索引可能需要较长时间。各频道组数据库独立，因此相同源频道会分别扫描和保存状态。
@@ -769,13 +791,15 @@ echo $?
 ### 4. 预览选材和文案
 
 ```bash
-.venv/bin/channel-operator --config config.toml run-once --dry-run
+docker compose run --rm channel-operator \
+  --config /app/config.toml run-once --dry-run
 ```
 
 也可以先只测试一个组：
 
 ```bash
-.venv/bin/channel-operator --config config.toml run-once --dry-run --group channel_b
+docker compose run --rm channel-operator \
+  --config /app/config.toml run-once --dry-run --group channel_b
 ```
 
 ### 5. 在测试频道正式发布
@@ -783,7 +807,8 @@ echo $?
 建议先把目标 ID 配置为测试频道，并为测试关系使用一个全新的频道组名称，使程序自动创建新的测试数据库：
 
 ```bash
-.venv/bin/channel-operator --config config.toml run-once --group channel_b
+docker compose run --rm channel-operator \
+  --config /app/config.toml run-once --group channel_b
 ```
 
 确认 Telegram 中满足：
@@ -795,7 +820,7 @@ echo $?
 - 视频能够流式播放。
 - 数据库和工作目录没有异常。
 
-验证完成后再启用 systemd 定时运行。
+验证完成后再启动 Docker 常驻调度器。
 
 ## 多频道串行、数据库和失败处理
 
@@ -881,357 +906,408 @@ channel_b.db-shm
 - 多路下载失败不会把分片按错误顺序拼接。
 - 当前媒体最终失败、任务取消或处理结束后，所属临时目录会被清理；下一次独立运行通常会重新下载该媒体。
 
-## systemd 生产部署
+## Docker 生产部署
 
-下面使用统一生产路径：
+生产环境推荐直接使用 Docker Engine 和 Docker Compose。Docker 负责 Python、Telethon、hachoir、cryptg 和 FFmpeg 依赖，宿主机只保留源码、真实配置和持久化数据，不再需要为本项目安装 Python 虚拟环境或复制 systemd unit。
+
+统一目录如下：
 
 ```text
-项目：/opt/telegram-channel-operator
-配置：/etc/channel-operator/config.toml
-环境：/etc/channel-operator/.env
-会话和数据库：/var/lib/channel-operator
-工作目录：/var/cache/channel-operator/work
+/opt/telegram/TG-Channels-Automated-Operation/
+├── Dockerfile               # 生产镜像定义
+├── compose.yaml             # 容器、资源、挂载和日志设置
+├── config.toml              # 实际运行配置，不提交 Git
+├── .env                     # Telegram 凭据，不提交 Git
+├── data/                    # Telethon Session 和各频道组 SQLite
+├── work/                    # 下载、转码、截图和全局进程锁
+├── deploy/
+│   └── config.production.toml
+└── src/
 ```
 
-如果你的项目实际位于 `/opt/telegram/TG-Channels-Automated-Operation`，可以继续使用该路径，但必须同步修改 systemd service 的 `WorkingDirectory` 和 `ExecStart`。
+`deploy/config.production.toml` 只是首次创建 `config.toml` 时使用的模板，程序和容器都不会自动读取它。容器实际读取项目根目录的 `config.toml` 和 `.env`。
 
-### 1. 创建专用系统用户和目录
+下面的 VPS 命令假定当前直接使用 root。
+
+### 1. 安装并检查 Docker
+
+安装 Docker Engine 和 Docker Compose plugin 后确认：
 
 ```bash
-sudo useradd --system --home /var/lib/channel-operator --create-home channel-operator
-sudo mkdir -p /opt/telegram-channel-operator
-sudo mkdir -p /etc/channel-operator
-sudo mkdir -p /var/cache/channel-operator/work
-sudo chown -R channel-operator:channel-operator /opt/telegram-channel-operator
-sudo chown -R channel-operator:channel-operator /var/lib/channel-operator
-sudo chown -R channel-operator:channel-operator /var/cache/channel-operator
+docker --version
+docker compose version
+docker info
 ```
 
-如果用户已经存在，`useradd` 提示存在可以忽略，不要重复删除用户。
+应使用 `docker compose`，而不是已经停止维护的旧命令 `docker-compose`。Docker 服务需要处于运行状态：
+
+```bash
+systemctl enable --now docker
+```
 
 ### 2. 获取项目源码
 
-首次从 Git 仓库部署：
+首次部署：
 
 ```bash
-sudo -u channel-operator git clone YOUR_REPOSITORY_URL /opt/telegram-channel-operator
-cd /opt/telegram-channel-operator
+mkdir -p /opt/telegram
+git clone YOUR_REPOSITORY_URL \
+  /opt/telegram/TG-Channels-Automated-Operation
+cd /opt/telegram/TG-Channels-Automated-Operation
 ```
 
-如果源码已经在该目录，只需要进入目录：
+源码已经存在时：
 
 ```bash
-cd /opt/telegram-channel-operator
+cd /opt/telegram/TG-Channels-Automated-Operation
+git status --short --branch
+git pull --ff-only
 ```
 
-### 3. 创建生产虚拟环境
+### 3. 创建真实配置和持久化目录
+
+以下命令不会覆盖已经存在的配置：
 
 ```bash
-sudo apt update
-sudo apt install -y python3.12 python3.12-venv ffmpeg git curl
-
-sudo -u channel-operator python3.12 -m venv /opt/telegram-channel-operator/.venv
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/python \
-  -m pip install --upgrade pip
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/python \
-  -m pip install -e '/opt/telegram-channel-operator[speed]'
+test -f config.toml || cp deploy/config.production.toml config.toml
+test -f .env || cp .env.example .env
+mkdir -p data work
+chmod 600 config.toml .env
+chmod 700 data work
 ```
 
-也可以在项目目录使用：
+编辑：
 
 ```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/python \
-  -m pip install -e '.[speed]'
+nano .env
+nano config.toml
 ```
 
-### 4. 安装生产配置
-
-```bash
-sudo cp /opt/telegram-channel-operator/deploy/config.production.toml \
-  /etc/channel-operator/config.toml
-sudo cp /opt/telegram-channel-operator/.env.example \
-  /etc/channel-operator/.env
-sudo chown root:channel-operator \
-  /etc/channel-operator/config.toml \
-  /etc/channel-operator/.env
-sudo chmod 640 \
-  /etc/channel-operator/config.toml \
-  /etc/channel-operator/.env
-```
-
-编辑真实配置：
-
-```bash
-sudo nano /etc/channel-operator/.env
-sudo nano /etc/channel-operator/config.toml
-```
-
-生产 `.env` 至少应包含：
+`.env` 示例：
 
 ```dotenv
 TG_API_ID=123456
 TG_API_HASH=替换为真实API_HASH
 TG_PHONE=+8613800000000
-TG_SESSION_PATH=/var/lib/channel-operator/telegram-user
+TG_SESSION_PATH=./data/telegram-user
 TG_REPORT_BOT_TOKEN=替换为真实机器人Token
+TZ=Asia/Shanghai
 ```
 
-生产 TOML 中建议使用：
-
-```toml
-[runtime]
-database_dir = "/var/lib/channel-operator"
-work_dir = "/var/cache/channel-operator/work"
-
-[[channel_groups]]
-name = "channel_b"
-# 其余字段按实际填写
-```
-
-每新增一个频道组，只需要使用新的唯一 `name`。程序会自动创建 `/var/lib/channel-operator/<name>.db`，不需要也不允许在频道组中填写 `database_path`。
-
-### 5. 登录 Telethon 用户账号
-
-```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml login
-```
-
-确认会话文件：
-
-```bash
-sudo ls -lh /var/lib/channel-operator/telegram-user.session
-```
-
-建议权限：
-
-```bash
-sudo chown channel-operator:channel-operator \
-  /var/lib/channel-operator/telegram-user.session
-sudo chmod 600 /var/lib/channel-operator/telegram-user.session
-```
-
-### 6. 运行生产 doctor
-
-```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml doctor
-```
-
-此时私人 Telegram 应收到机器人测试消息。任何频道组显示 `ERROR` 时，不要启用定时任务，先修复频道 ID、权限或 `database_dir` 权限。
-
-### 7. 建立生产索引和预览
-
-```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml index
-
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml run-once --dry-run
-```
-
-### 8. 安装 systemd 文件
-
-```bash
-sudo cp /opt/telegram-channel-operator/deploy/systemd/channel-operator.service \
-  /etc/systemd/system/channel-operator.service
-sudo cp /opt/telegram-channel-operator/deploy/systemd/channel-operator.timer \
-  /etc/systemd/system/channel-operator.timer
-```
-
-检查 service 中路径是否与实际部署一致：
-
-```bash
-sudo systemctl cat channel-operator.service
-```
-
-项目提供的 service 使用：
-
-```ini
-WorkingDirectory=/opt/telegram-channel-operator
-ExecStart=/opt/telegram-channel-operator/.venv/bin/channel-operator --config /etc/channel-operator/config.toml run-once
-```
-
-如果项目目录不同，编辑 service：
-
-```bash
-sudo systemctl edit --full channel-operator.service
-```
-
-### 9. 检查和修改定时器
-
-默认每天北京时间 00:01 运行：
-
-```ini
-OnCalendar=*-*-* 00:01:00 Asia/Shanghai
-Persistent=true
-```
-
-修改时间：
-
-```bash
-sudo systemctl edit --full channel-operator.timer
-```
-
-例如每天北京时间 03:30：
-
-```ini
-OnCalendar=*-*-* 03:30:00 Asia/Shanghai
-```
-
-同时把 `config.toml` 改为：
+`config.toml` 必须使用容器内可解析的相对持久化目录：
 
 ```toml
 [schedule]
 timezone = "Asia/Shanghai"
-daily_time = "03:30"
+daily_time = "00:01"
+
+[runtime]
+database_dir = "./data"
+work_dir = "./work"
 ```
 
-### 10. 启用定时任务
+相对路径以容器中的 `/app/config.toml` 为基准，因此最终分别对应 `/app/data` 和 `/app/work`；这两个目录又绑定到宿主机项目目录中的 `data/` 和 `work/`。
+
+每个频道组仍只配置唯一 `name`。数据库自动保存为 `data/<name>.db`，不配置 `database_path`。
+
+### 4. 理解 Compose 的持久化和资源设置
+
+项目提供的 `compose.yaml` 使用四个 bind mount：
+
+| 宿主机路径 | 容器路径 | 权限 | 用途 |
+|---|---|---|---|
+| `./config.toml` | `/app/config.toml` | 只读 | 主配置 |
+| `./.env` | `/app/.env` | 只读 | API、账号和机器人凭据 |
+| `./data` | `/app/data` | 读写 | Session 与 SQLite |
+| `./work` | `/app/work` | 读写 | 临时媒体和进程锁 |
+
+重建或更新容器不会删除 `data/`，因此不会丢失登录 Session、索引和发布记录。`work/` 里的单个媒体临时目录仍由程序在处理结束时清理。
+
+默认资源：
+
+```yaml
+cpus: 4.0
+mem_limit: 5g
+```
+
+这适合 4 核 6 GiB VPS，并为宿主机和 Docker daemon 留出约 1 GiB 内存。`ffmpeg_threads = 4` 仍然是 FFmpeg 自身的编码线程限制。容器不会获得超过宿主机实际数量的 CPU；如果 VPS 以后改为 2 核，应同时降低 `cpus` 和 `ffmpeg_threads`。
+
+Compose 还启用了：
+
+- `restart: unless-stopped`：VPS 或 Docker 重启后自动恢复调度器。
+- `init: true`：正确转发停止信号并回收子进程。
+- `stop_grace_period: 10m`：给 Telethon、FFmpeg 和清理逻辑留出退出时间。
+- `read_only: true`：容器镜像根文件系统只读。
+- `cap_drop: [ALL]` 和 `no-new-privileges`。
+- JSON 日志每个文件最多 20 MiB，最多保留 5 个。
+- 容器内默认使用 root；只有挂载的 `data/` 和 `work/` 用于持久写入。
+
+### 5. 构建镜像
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now channel-operator.timer
-systemctl list-timers channel-operator.timer
+cd /opt/telegram/TG-Channels-Automated-Operation
+docker compose build
 ```
 
-手工触发一次 systemd service：
+镜像构建时会安装 Python 3.12、Telethon、hachoir、cryptg、HTTPX、FFmpeg 和时区数据。检查最终镜像：
 
 ```bash
-sudo systemctl start channel-operator.service
-systemctl status channel-operator.service --no-pager
+docker image ls telegram-channel-operator
+docker compose config
 ```
 
-查看实时日志：
+`docker compose config` 不应报告缺少 `config.toml`、`.env`、`data` 或 `work`。
+
+### 6. 在一次性容器中登录 Telegram
+
+在启动常驻调度器前执行：
 
 ```bash
-journalctl -u channel-operator.service -f
+docker compose run --rm channel-operator \
+  --config /app/config.toml login
 ```
 
-查看最近 300 行：
+根据提示输入验证码和两步验证密码。成功后检查宿主机文件：
 
 ```bash
-journalctl -u channel-operator.service -n 300 --no-pager
+ls -lh data/telegram-user.session
+chmod 600 data/telegram-user.session
 ```
 
-查看指定日期日志：
+`--rm` 只删除这次登录使用的临时容器，不会删除 bind mount 中的 Session。
+
+### 7. 在一次性容器中检查、索引和预览
+
+依次执行：
 
 ```bash
-journalctl -u channel-operator.service \
-  --since "2026-08-09 00:00:00" \
-  --until "2026-08-10 00:00:00" \
-  --no-pager
+docker compose run --rm channel-operator \
+  --config /app/config.toml doctor
+
+docker compose run --rm channel-operator \
+  --config /app/config.toml index
+
+docker compose run --rm channel-operator \
+  --config /app/config.toml run-once --dry-run
 ```
 
-### systemd 安全限制
+只检查或预览某个频道组：
 
-提供的 service 使用：
+```bash
+docker compose run --rm channel-operator \
+  --config /app/config.toml doctor --group channel_b
 
-- `NoNewPrivileges=true`
-- `PrivateTmp=true`
-- `ProtectSystem=strict`
-- `ProtectHome=true`
-- 只允许写入 `/var/lib/channel-operator` 和 `/var/cache/channel-operator`
+docker compose run --rm channel-operator \
+  --config /app/config.toml run-once --dry-run --group channel_b
+```
 
-因此生产数据库、Session 和工作目录必须放在允许写入的路径中。如果把数据库配置到 `/opt` 或 `/etc`，systemd 运行时可能出现权限错误。
+`doctor` 会真实向全部报告接收人发送测试消息。确认频道权限、数据库路径、FFmpeg 和报告机器人全部正常后，再启动常驻容器。
+
+### 8. 启动每日自动任务
+
+```bash
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 channel-operator
+```
+
+镜像默认运行：
+
+```bash
+channel-operator --config /app/config.toml schedule
+```
+
+调度规则：
+
+- 容器在当天 `daily_time` 之前启动：等待到点运行。
+- 容器在当天 `daily_time` 之后启动：立即补跑一次。
+- 每次运行都执行全部频道组，完成后发送机器人汇总。
+- 一组失败不会结束常驻调度器，下一天会继续检查。
+- 容器重启后再次补跑也会先读取 SQLite 的当天完成数，只补足差额。
+- 修改 `daily_time`、`timezone` 或频道组后，执行 `docker compose restart channel-operator` 重新加载配置。
+
+### 9. 查看日志和资源
+
+实时日志：
+
+```bash
+docker compose logs -f channel-operator
+```
+
+最近 300 行：
+
+```bash
+docker compose logs --tail=300 channel-operator
+```
+
+查看日志时间范围：
+
+```bash
+docker compose logs \
+  --since "2026-08-09T00:00:00+08:00" \
+  --until "2026-08-10T00:00:00+08:00" \
+  channel-operator
+```
+
+观察 CPU、内存、网络和磁盘 I/O：
+
+```bash
+docker stats channel-operator
+```
+
+在 Docker 的 CPU 显示中，多核容器可能超过 100%。例如四核上的 320% 大约表示使用了三点二个核心，不代表超出服务器能力。
+
+### 10. 手工立即运行
+
+常驻容器已经运行时，可以在同一个容器内立即执行：
+
+```bash
+docker compose exec channel-operator \
+  channel-operator --config /app/config.toml run-once
+```
+
+只运行一个组：
+
+```bash
+docker compose exec channel-operator \
+  channel-operator --config /app/config.toml run-once --group channel_b
+```
+
+如果定时任务正在运行，全局锁会拒绝第二个任务，不会并行下载或转码。不要启动多个使用不同 `work_dir` 但共享数据库的容器来绕过锁。
+
+### 11. 停止和重新启动
+
+优雅停止：
+
+```bash
+docker compose stop -t 600
+```
+
+再次启动：
+
+```bash
+docker compose start
+```
+
+重新创建容器但保留数据：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+停止并删除容器和项目网络：
+
+```bash
+docker compose down
+```
+
+`docker compose down` 不会删除 bind mount 中的 `data/`、`work/`、`config.toml` 和 `.env`。不要手工删除 `data/`，否则会丢失 Session、索引和防重复发布记录。
+
+### 12. 从旧 systemd 部署切换
+
+先停用旧定时器，避免 systemd 与 Docker 在同一时刻启动两个任务：
+
+```bash
+systemctl disable --now channel-operator.timer
+systemctl stop channel-operator.service
+```
+
+如果旧版已经使用当前项目根目录下的 `config.toml`、`.env`、`data/` 和 `work/`，无需迁移数据，直接构建并启动 Docker。
+
+如果旧数据仍位于 `/var/lib/channel-operator`，旧配置仍位于 `/etc/channel-operator`，先在 Docker 尚未启动时复制，并且不覆盖已经存在的文件：
+
+```bash
+cd /opt/telegram/TG-Channels-Automated-Operation
+mkdir -p data work
+
+if [ ! -f config.toml ] && [ -f /etc/channel-operator/config.toml ]; then
+  cp -a /etc/channel-operator/config.toml config.toml
+fi
+if [ ! -f .env ] && [ -f /etc/channel-operator/.env ]; then
+  cp -a /etc/channel-operator/.env .env
+fi
+if [ -d /var/lib/channel-operator ]; then
+  cp -a -n /var/lib/channel-operator/. data/
+fi
+
+chmod 600 config.toml .env
+chmod 700 data work
+```
+
+随后把 `TG_SESSION_PATH`、`database_dir`、`work_dir` 分别改成 `./data/telegram-user`、`./data`、`./work`。通过登录检查、`doctor` 和 dry-run 后再启动 Compose。确认 Docker 至少完成一次正式任务之前，保留旧目录作为回退副本。
+
+旧 unit 文件留在 `/etc/systemd/system` 不会占用资源，只要 timer 已经 disabled。确认不再回退 systemd 后可以自行删除。
 
 ## 更新源码和升级
 
-### 1. 在更新前确认任务没有运行
+### 1. 确认当前任务处于等待状态
+
+先查看日志和进程：
 
 ```bash
-systemctl is-active channel-operator.service
+cd /opt/telegram/TG-Channels-Automated-Operation
+docker compose logs --tail=100 channel-operator
+docker top channel-operator
 ```
 
-如果输出 `active`，建议等待当前媒体组和任务自然完成。不要在上传过程中强制更新。
+如果看到 FFmpeg、上传或下载仍在运行，建议等待当前媒体组自然完成后再更新。
 
-临时停止后续定时触发：
+### 2. 停止容器并备份
 
 ```bash
-sudo systemctl stop channel-operator.timer
+docker compose stop -t 600
+
+mkdir -p /var/backups/channel-operator/2026-08-09
+cp -a config.toml .env data \
+  /var/backups/channel-operator/2026-08-09/
 ```
 
-### 2. 备份配置、会话和数据库
+把日期替换为实际日期；目录已经存在时增加时间后缀，避免覆盖以前的备份。`work/` 是可重建的临时目录，通常不备份。
+
+### 3. 拉取源码并重建
 
 ```bash
-sudo mkdir -p /var/backups/channel-operator
-sudo cp -a /etc/channel-operator \
-  /var/backups/channel-operator/etc-channel-operator
-sudo cp -a /var/lib/channel-operator \
-  /var/backups/channel-operator/var-lib-channel-operator
+git status --short --branch
+git pull --ff-only
+docker compose build --pull
+docker compose up -d --remove-orphans
 ```
 
-如果目标备份目录已经存在，先为备份目录增加日期后缀，避免覆盖旧备份。
+`git pull` 不会覆盖被 `.gitignore` 排除的真实 `config.toml`、`.env`、`data/` 和 `work/`。`docker compose up` 重建容器时也会保留这些 bind mount 数据。
 
-### 3. 拉取源码
+如果显示 `Already up to date.`，说明远程仓库没有更新提交，需要先在开发机器提交并推送。
+
+### 4. 验证升级
 
 ```bash
-cd /opt/telegram-channel-operator
-sudo -u channel-operator git status --short --branch
-sudo -u channel-operator git pull --ff-only
+docker compose ps
+docker compose logs --tail=200 channel-operator
+
+docker compose exec channel-operator \
+  channel-operator --config /app/config.toml doctor
 ```
 
-如果显示 `Already up to date.`，说明远程仓库没有比 VPS 更新的提交。必须先在开发机器提交并推送本地修改。
-
-### 4. 重新安装依赖
-
-即使只是拉取 Python 源码，也建议执行：
+如果只修改 `config.toml` 或 `.env`，不需要重建镜像，但需要重启调度器：
 
 ```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/python \
-  -m pip install -e '.[speed]'
+docker compose restart channel-operator
 ```
 
-这一步会安装新增依赖，例如报告机器人使用的 HTTPX。
-
-### 5. 检查配置兼容性
-
-当前多频道版本不支持旧配置：
-
-```toml
-[telegram]
-source_channel = ...
-target_channel = ...
-```
-
-也不再从以下位置读取单一数据库和每日数量：
-
-```toml
-[schedule]
-daily_success_count = 4
-
-[runtime]
-database_path = "./data/operator.db"
-```
-
-必须改用一个或多个 `[[channel_groups]]`。新版数据库目录只在 `[runtime]` 中统一配置：
-
-```toml
-[runtime]
-database_dir = "/var/lib/channel-operator"
-
-[[channel_groups]]
-name = "channel_b"
-source_channel = -1001111111111
-target_channel = -1002222222222
-daily_success_count = 4
-```
-
-如果升级前已经在每个 `[[channel_groups]]` 中配置了 `database_path`，请删除这些行，并确保旧数据库文件名正好是 `<name>.db` 后放入 `database_dir`。例如 `channel_b` 对应 `channel_b.db`。文件名符合规则时可以继续使用原数据库；不要在程序运行时移动数据库及其 `-wal`、`-shm` 文件。
-
-### 6. 验证并重新启用
+如果修改 Python 依赖、源码、Dockerfile 或 Compose，使用：
 
 ```bash
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml doctor
-
-sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operator \
-  --config /etc/channel-operator/config.toml run-once --dry-run
-
-sudo systemctl daemon-reload
-sudo systemctl restart channel-operator.timer
-systemctl list-timers channel-operator.timer
+docker compose up -d --build --remove-orphans
 ```
+
+### 5. 清理旧镜像
+
+确认新容器运行正常后，可以清理没有被任何容器引用的悬空镜像：
+
+```bash
+docker image prune
+```
+
+此命令不会删除正在使用的镜像，也不会删除项目的 bind mount 数据。执行前仍应先检查 `docker image ls`。
 
 ## 日志与故障排查
 
@@ -1276,10 +1352,11 @@ git pull --ff-only
 执行：
 
 ```bash
-.venv/bin/channel-operator --config config.toml login
+docker compose run --rm channel-operator \
+  --config /app/config.toml login
 ```
 
-systemd 部署时必须使用与 service 相同的 `channel-operator` 用户登录，否则 Session 可能生成在错误位置或权限不正确。
+登录容器和常驻容器挂载同一个宿主机 `data/`，因此生成的 Session 会被正式任务直接使用。不要把 `TG_SESSION_PATH` 配置到 `/tmp` 或容器镜像内部。
 
 ### 频道组被跳过
 
@@ -1308,16 +1385,16 @@ target_channel = -1009999999999
 daily_success_count = 4
 ```
 
-它会自动使用 `/var/lib/channel-operator/channel_new.db`。如果确认旧数据库不再需要，应先停止任务并备份，再处理旧文件；不要在程序运行时删除数据库。
+它会自动使用 `/opt/telegram/TG-Channels-Automated-Operation/data/channel_new.db`。如果确认旧数据库不再需要，应先停止任务并备份，再处理旧文件；不要在程序运行时删除数据库。
 
 ### 磁盘空间不足
 
 检查工作目录所在文件系统：
 
 ```bash
-df -hT /var/cache/channel-operator/work
-df -i /var/cache/channel-operator/work
-du -sh /var/cache/channel-operator/work
+df -hT /opt/telegram/TG-Channels-Automated-Operation/work
+df -i /opt/telegram/TG-Channels-Automated-Operation/work
+du -sh /opt/telegram/TG-Channels-Automated-Operation/work
 ```
 
 检查磁盘和分区：
@@ -1338,10 +1415,10 @@ curl -4 -L -o /dev/null -sS \
   'https://fsn1-speed.hetzner.com/100MB.bin'
 ```
 
-观察 Telegram 媒体连接：
+观察容器网络流量：
 
 ```bash
-ss -tinp | grep ':443'
+docker stats channel-operator
 ```
 
 查看 `.part` 文件增长：
@@ -1383,7 +1460,7 @@ ffmpeg_threads = 3
 观察：
 
 ```bash
-top
+docker stats channel-operator
 ```
 
 ### 当天立即运行却显示已经完成
@@ -1403,34 +1480,37 @@ top
 说明全局锁已被另一个进程持有。检查：
 
 ```bash
-ps aux | grep channel-operator
-systemctl status channel-operator.service --no-pager
+docker compose ps
+docker top channel-operator
 ```
 
 不要删除锁文件来强行并行运行。先确认旧任务已经真正结束。
 
-### systemd 权限错误
+### Docker 挂载或权限错误
 
 检查：
 
 ```bash
-sudo -u channel-operator test -r /etc/channel-operator/config.toml && echo config-readable
-sudo -u channel-operator test -r /etc/channel-operator/.env && echo env-readable
-sudo -u channel-operator test -w /var/lib/channel-operator && echo data-writable
-sudo -u channel-operator test -w /var/cache/channel-operator/work && echo work-writable
+cd /opt/telegram/TG-Channels-Automated-Operation
+docker compose config
+ls -ld config.toml .env data work
+test -r /opt/telegram/TG-Channels-Automated-Operation/config.toml && echo config-readable
+test -r /opt/telegram/TG-Channels-Automated-Operation/.env && echo env-readable
+test -w /opt/telegram/TG-Channels-Automated-Operation/data && echo data-writable
+test -w /opt/telegram/TG-Channels-Automated-Operation/work && echo work-writable
 ```
 
 再查看：
 
 ```bash
-journalctl -u channel-operator.service -n 200 --no-pager
+docker compose logs --tail=200 channel-operator
 ```
 
 ## 安全建议
 
 - 不要提交 `.env`、真实 `config.toml`、`.session`、SQLite 数据库和工作目录。
-- `.env` 建议权限为 `600`；systemd 场景可用 `root:channel-operator` 和 `640`。
-- Telethon Session 建议权限为 `600`，所有者为运行服务的用户。
+- `.env` 和真实 `config.toml` 建议使用 `root:root` 和 `600`。
+- Telethon Session 建议权限为 `600`，所有者为 root。
 - 不要在日志、截图、Issue 或聊天中暴露 API Hash、Bot Token 或 Session 文件。
 - 项目会关闭 HTTPX/httpcore 的请求 URL 日志，避免 Bot Token 出现在 Bot API URL 日志中。
 - 数据库包含目标消息 ID、处理状态和文案，不应公开。

@@ -22,8 +22,8 @@ album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
 
 [runtime]
-database_dir = "/var/lib/channel-operator"
-work_dir = "/var/cache/channel-operator/work"
+database_dir = "./data"
+work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4

@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from channel_operator.cli import _select_groups
+from channel_operator.cli import _parser, _select_groups
 from channel_operator.config import ChannelGroupConfig, ConfigError
 
 
@@ -24,3 +24,10 @@ def test_group_selector_preserves_order_and_rejects_unknown(app_config):
     assert _select_groups(config, "channel_c") == (second,)
     with pytest.raises(ConfigError, match="未知频道组"):
         _select_groups(config, "missing")
+
+
+def test_schedule_command_is_available():
+    arguments = _parser().parse_args(["--config", "config.toml", "schedule"])
+
+    assert arguments.command == "schedule"
+    assert arguments.config == "config.toml"

@@ -10,6 +10,7 @@ from .locking import AlreadyRunningError, ProcessLock
 from .media import MediaProcessor
 from .reporting import BotReporter, ReporterError
 from .runner import MultiChannelRunner
+from .scheduler import run_scheduler
 from .service import AutomationService
 from .telegram import TelegramError, TelegramGateway
 
@@ -27,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run-once", help="执行一次每日任务")
     run.add_argument("--dry-run", action="store_true", help="仅预览选材和文案")
     run.add_argument("--group", help="只运行指定频道组")
+    commands.add_parser("schedule", help="常驻运行并按配置时间每天执行")
     return parser
 
 
@@ -68,6 +70,20 @@ async def _report_group_error(
 
 async def _run(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
+
+    if arguments.command == "schedule":
+        async def run_job() -> int:
+            daily_arguments = argparse.Namespace(
+                config=arguments.config,
+                verbose=arguments.verbose,
+                command="run-once",
+                dry_run=False,
+                group=None,
+            )
+            return await _run(daily_arguments)
+
+        return await run_scheduler(config, run_job)
+
     media = MediaProcessor(config)
     telegram = TelegramGateway(config)
 
