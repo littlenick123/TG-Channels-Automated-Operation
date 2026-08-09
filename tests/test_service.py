@@ -14,6 +14,8 @@ class FakeTelegram:
         self.snapshots = snapshots if isinstance(snapshots, list) else [snapshots]
         self.sent_files = None
         self.sent_caption = None
+        self.sent_thumbnail = None
+        self.sent_video_info = None
         self.notifications = []
         self.downloaded_message_ids = []
 
@@ -28,9 +30,20 @@ class FakeTelegram:
         destination.write_bytes(b"source")
         return destination
 
-    async def send_album(self, files, caption_html, caption_plain, upload_started_at):
+    async def send_album(
+        self,
+        files,
+        caption_html,
+        caption_plain,
+        upload_started_at,
+        *,
+        video_info,
+        thumbnail,
+    ):
         self.sent_files = [path.name for path in files]
         self.sent_caption = caption_html
+        self.sent_thumbnail = thumbnail.name
+        self.sent_video_info = video_info
         return DeliveryReceipt((101, 102, 103, 104), 999)
 
     async def find_matching_album(self, started_at, caption_plain):
@@ -65,6 +78,11 @@ class FakeMedia:
             frames.append(frame)
         return frames
 
+    async def thumbnail(self, video, destination):
+        assert video.name == "video.mp4"
+        destination.write_bytes(b"thumbnail")
+        return destination
+
 
 @pytest.mark.asyncio
 async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_config):
@@ -90,6 +108,9 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
     assert summary.published == 1
     assert telegram.sent_files == ["video.mp4", "frame_1.jpg", "frame_2.jpg", "frame_3.jpg"]
     assert telegram.sent_caption.startswith("#必留")
+    assert telegram.sent_thumbnail == "video_thumb.jpg"
+    assert telegram.sent_video_info.display_width == 1280
+    assert telegram.sent_video_info.display_height == 720
     assert list(config.work_dir.iterdir()) == []
     assert database.published_count(str(config.source_channel), summary.run_date) == 1
     database.close()

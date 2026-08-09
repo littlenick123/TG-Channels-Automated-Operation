@@ -10,10 +10,15 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from telethon import TelegramClient, errors
-from telethon.tl.types import DocumentAttributeAnimated, DocumentAttributeVideo
+from telethon.tl.types import (
+    DocumentAttributeAnimated,
+    DocumentAttributeFilename,
+    DocumentAttributeVideo,
+    InputMediaUploadedDocument,
+)
 
 from .config import AppConfig
-from .models import DeliveryReceipt, MessageSnapshot
+from .models import DeliveryReceipt, MessageSnapshot, VideoInfo
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -246,15 +251,36 @@ class TelegramGateway:
         caption_html: str,
         caption_plain: str,
         upload_started_at: str,
+        *,
+        video_info: VideoInfo,
+        thumbnail: Path,
     ) -> DeliveryReceipt:
         if len(files) != 4:
             raise TelegramError("目标媒体组必须恰好包含 1 个视频和 3 张图片")
         target = await self._target_entity()
 
         async def operation() -> Any:
+            uploaded_video = await self.client.upload_file(str(files[0]))
+            uploaded_thumbnail = await self.client.upload_file(str(thumbnail))
+            video_media = InputMediaUploadedDocument(
+                file=uploaded_video,
+                thumb=uploaded_thumbnail,
+                mime_type="video/mp4",
+                attributes=[
+                    DocumentAttributeFilename(files[0].name),
+                    DocumentAttributeVideo(
+                        duration=video_info.duration,
+                        w=video_info.display_width,
+                        h=video_info.display_height,
+                        supports_streaming=True,
+                        nosound=not video_info.has_audio,
+                    ),
+                ],
+                nosound_video=True,
+            )
             return await self.client.send_file(
                 target,
-                [str(path) for path in files],
+                [video_media, *(str(path) for path in files[1:])],
                 caption=[caption_html, "", "", ""],
                 parse_mode="html",
                 supports_streaming=True,

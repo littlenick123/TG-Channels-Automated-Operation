@@ -131,12 +131,18 @@ class AutomationService:
             output = directory / "video.mp4"
             output_info = await self.media.transcode(source, output, source_info)
             frames = await self.media.screenshots(output, output_info.duration, directory)
+            thumbnail = await self.media.thumbnail(output, directory / "video_thumb.jpg")
 
             upload_started_at = self.database.begin_upload(
                 self.source_key, group.grouped_id, caption.html, caption.plain
             )
             receipt = await self.telegram.send_album(
-                [output, *frames], caption.html, caption.plain, upload_started_at
+                [output, *frames],
+                caption.html,
+                caption.plain,
+                upload_started_at,
+                video_info=output_info,
+                thumbnail=thumbnail,
             )
             self.database.mark_published(
                 self.source_key,

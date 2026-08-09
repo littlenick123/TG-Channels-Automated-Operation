@@ -4,14 +4,22 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from telethon import utils
+from telethon.tl.types import (
+    DocumentAttributeFilename,
+    DocumentAttributeVideo,
+    InputFile,
+    InputMediaUploadedDocument,
+)
 
-from channel_operator.models import DeliveryReceipt
+from channel_operator.models import DeliveryReceipt, VideoInfo
 from channel_operator.telegram import TelegramGateway
 
 
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.uploads = []
 
     async def get_entity(self, entity):
         return entity
@@ -19,6 +27,16 @@ class FakeClient:
     async def send_file(self, entity, files, **kwargs):
         self.calls.append((entity, files, kwargs))
         return [SimpleNamespace(id=index, grouped_id=777) for index in range(10, 14)]
+
+    async def upload_file(self, file):
+        uploaded = InputFile(
+            id=len(self.uploads) + 1,
+            parts=1,
+            name=Path(file).name,
+            md5_checksum="test",
+        )
+        self.uploads.append((file, uploaded))
+        return uploaded
 
 
 class FlakyClient(FakeClient):
@@ -90,17 +108,40 @@ async def test_send_album_is_one_call_in_video_then_image_order(app_config, tmp_
         tmp_path / "frame_2.jpg",
         tmp_path / "frame_3.jpg",
     ]
+    thumbnail = tmp_path / "video_thumb.jpg"
+    video_info = VideoInfo(files[0], 180.5, 1280, 720, has_audio=True)
 
     receipt = await gateway.send_album(
         files,
         "<blockquote>简介</blockquote>",
         "简介",
         "2026-08-02T00:00:00+00:00",
+        video_info=video_info,
+        thumbnail=thumbnail,
     )
 
     assert len(client.calls) == 1
     _, sent_files, options = client.calls[0]
-    assert sent_files == [str(path) for path in files]
+    assert isinstance(sent_files[0], InputMediaUploadedDocument)
+    assert sent_files[1:] == [str(path) for path in files[1:]]
+    assert sent_files[0].file is client.uploads[0][1]
+    assert sent_files[0].thumb is client.uploads[1][1]
+    assert bytes(sent_files[0])
+    assert utils.get_input_media(sent_files[0]) is sent_files[0]
+    video_attribute = next(
+        attribute
+        for attribute in sent_files[0].attributes
+        if isinstance(attribute, DocumentAttributeVideo)
+    )
+    filename_attribute = next(
+        attribute
+        for attribute in sent_files[0].attributes
+        if isinstance(attribute, DocumentAttributeFilename)
+    )
+    assert (video_attribute.w, video_attribute.h) == (1280, 720)
+    assert video_attribute.duration == 180.5
+    assert video_attribute.supports_streaming is True
+    assert filename_attribute.file_name == "video.mp4"
     assert options["caption"] == ["<blockquote>简介</blockquote>", "", "", ""]
     assert options["supports_streaming"] is True
     assert receipt.message_ids == (10, 11, 12, 13)
@@ -117,12 +158,15 @@ async def test_ambiguous_send_checks_target_before_retrying(app_config, tmp_path
         tmp_path / "frame_2.jpg",
         tmp_path / "frame_3.jpg",
     ]
+    video_info = VideoInfo(files[0], 180, 1280, 720, has_audio=True)
 
     receipt = await gateway.send_album(
         files,
         "<blockquote>简介</blockquote>",
         "简介",
         "2026-08-02T00:00:00+00:00",
+        video_info=video_info,
+        thumbnail=tmp_path / "video_thumb.jpg",
     )
 
     assert len(client.calls) == 1

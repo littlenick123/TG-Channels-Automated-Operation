@@ -9,6 +9,8 @@ from typing import Any
 from .config import AppConfig
 from .models import VideoInfo
 
+THUMBNAIL_MAX_BYTES = 20 * 1024
+
 
 class MediaError(RuntimeError):
     """Raised when probing or processing a media file fails."""
@@ -158,3 +160,32 @@ class MediaProcessor:
             )
             paths.append(output)
         return paths
+
+    async def thumbnail(self, video: Path, destination: Path) -> Path:
+        attempts = ((320, 8), (320, 12), (256, 12), (256, 16), (192, 16))
+        for dimension, quality in attempts:
+            scale = (
+                f"scale={dimension}:{dimension}:force_original_aspect_ratio=decrease:"
+                "force_divisible_by=2"
+            )
+            await self._run(
+                self.config.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(video),
+                "-vf",
+                scale,
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(quality),
+                str(destination),
+            )
+            if 0 < destination.stat().st_size <= THUMBNAIL_MAX_BYTES:
+                return destination
+        raise MediaError(
+            f"无法生成不超过 {THUMBNAIL_MAX_BYTES} 字节的视频缩略图：{video}"
+        )

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from channel_operator.media import MediaProcessor
+from channel_operator.media import THUMBNAIL_MAX_BYTES, MediaProcessor
 
 
 def test_screenshot_time_rules():
@@ -43,7 +43,9 @@ async def test_transcode_and_extract_three_frames(app_config, tmp_path: Path):
     output = tmp_path / "video.mp4"
     output_info = await processor.transcode(source, output, source_info)
     frames = await processor.screenshots(output, output_info.duration, tmp_path)
+    thumbnail = await processor.thumbnail(output, tmp_path / "video_thumb.jpg")
 
     assert (output_info.width, output_info.height) == (1280, 720)
     assert len(frames) == 3
     assert all(frame.exists() and frame.stat().st_size > 0 for frame in frames)
+    assert 0 < thumbnail.stat().st_size <= THUMBNAIL_MAX_BYTES
