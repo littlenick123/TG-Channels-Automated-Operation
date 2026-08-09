@@ -8,7 +8,7 @@ import pytest
 from channel_operator.config import ChannelGroupConfig
 from channel_operator.database import StateDatabase
 from channel_operator.models import DeliveryReceipt, MessageSnapshot, VideoInfo
-from channel_operator.runner import MultiChannelRunner
+from channel_operator.runner import MultiChannelRunner, format_duration
 from channel_operator.telegram import ChannelGroupUnavailable
 
 
@@ -130,16 +130,33 @@ def two_group_config(app_config):
     return replace(config, channel_groups=(first, second))
 
 
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (0, "0秒"),
+        (59.9, "59秒"),
+        (60, "1分钟0秒"),
+        (3_723, "1小时2分钟3秒"),
+        (93_784, "1天2小时3分钟4秒"),
+        (-1, "0秒"),
+    ],
+)
+def test_format_duration(seconds, expected):
+    assert format_duration(seconds) == expected
+
+
 @pytest.mark.asyncio
 async def test_runner_processes_groups_strictly_in_configuration_order(app_config):
     config = two_group_config(app_config)
     events = []
     reporter = FakeReporter()
+    clock_values = iter((100.0, 3_823.0))
     runner = MultiChannelRunner(
         config,
         GatewayFactory(events),
         FakeMedia(config, events),
         reporter,
+        clock=lambda: next(clock_values),
     )
 
     results = await runner.run_once(config.channel_groups)
@@ -158,6 +175,7 @@ async def test_runner_processes_groups_strictly_in_configuration_order(app_confi
         "transcode:channel_c",
         "send:channel_c",
     ]
+    assert "所有频道组总耗时：1小时2分钟3秒" in reporter.messages[-1]
     for group in config.channel_groups:
         database = StateDatabase(group.database_path)
         assert database.published_count(str(group.source_channel), results[0].summary.run_date) == 1

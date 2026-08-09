@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from datetime import datetime
 
 from .config import AppConfig, ChannelGroupConfig
@@ -14,6 +16,22 @@ from .telegram import TelegramGateway
 LOGGER = logging.getLogger(__name__)
 
 
+def format_duration(elapsed_seconds: float) -> str:
+    total_seconds = max(0, int(elapsed_seconds))
+    days, remainder = divmod(total_seconds, 86_400)
+    hours, remainder = divmod(remainder, 3_600)
+    minutes, seconds = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days}天")
+    if days or hours:
+        parts.append(f"{hours}小时")
+    if days or hours or minutes:
+        parts.append(f"{minutes}分钟")
+    parts.append(f"{seconds}秒")
+    return "".join(parts)
+
+
 class MultiChannelRunner:
     def __init__(
         self,
@@ -21,11 +39,13 @@ class MultiChannelRunner:
         telegram: TelegramGateway,
         media: MediaProcessor,
         reporter: BotReporter,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.config = config
         self.telegram = telegram
         self.media = media
         self.reporter = reporter
+        self.clock = clock
 
     @staticmethod
     def _database(group: ChannelGroupConfig) -> StateDatabase:
@@ -56,6 +76,7 @@ class MultiChannelRunner:
     async def run_once(
         self, groups: tuple[ChannelGroupConfig, ...]
     ) -> list[GroupRunResult]:
+        started_at = self.clock()
         results: list[GroupRunResult] = []
         for group in groups:
             LOGGER.info("开始处理频道组 %s", group.name)
@@ -105,13 +126,24 @@ class MultiChannelRunner:
             finally:
                 if database is not None:
                     database.close()
+        elapsed_seconds = max(0.0, self.clock() - started_at)
         run_date = datetime.now(self.config.timezone).date().isoformat()
-        await self.reporter.send(self.format_summary(results, run_date=run_date))
+        LOGGER.info("所有频道组处理完成，总耗时 %s", format_duration(elapsed_seconds))
+        await self.reporter.send(
+            self.format_summary(
+                results,
+                run_date=run_date,
+                elapsed_seconds=elapsed_seconds,
+            )
+        )
         return results
 
     @staticmethod
     def format_summary(
-        results: list[GroupRunResult], *, run_date: str | None = None
+        results: list[GroupRunResult],
+        *,
+        run_date: str | None = None,
+        elapsed_seconds: float = 0.0,
     ) -> str:
         resolved_date = run_date or next(
             (
@@ -121,7 +153,10 @@ class MultiChannelRunner:
             ),
             "unknown",
         )
-        blocks = [f"Telegram 多频道自动运营任务 {resolved_date}"]
+        blocks = [
+            f"Telegram 多频道自动运营任务 {resolved_date}\n"
+            f"所有频道组总耗时：{format_duration(elapsed_seconds)}"
+        ]
         for result in results:
             group = result.group
             if result.summary is None:
