@@ -134,9 +134,11 @@ class MediaProcessor:
 
     @staticmethod
     def screenshot_times(duration: float) -> tuple[float, float, float]:
-        if duration > 120:
-            return (20.0, duration / 2, duration - 60)
-        return (duration * 0.1, duration * 0.5, duration * 0.9)
+        return (duration * 0.15, duration * 0.5, duration * 0.85)
+
+    @staticmethod
+    def thumbnail_time(duration: float) -> float:
+        return duration * 0.1
 
     async def screenshots(self, video: Path, duration: float, directory: Path) -> list[Path]:
         paths: list[Path] = []
@@ -161,7 +163,8 @@ class MediaProcessor:
             paths.append(output)
         return paths
 
-    async def thumbnail(self, video: Path, destination: Path) -> Path:
+    async def thumbnail(self, video: Path, duration: float, destination: Path) -> Path:
+        timestamp = self.thumbnail_time(duration)
         attempts = ((320, 8), (320, 12), (256, 12), (256, 16), (192, 16))
         for dimension, quality in attempts:
             scale = (
@@ -174,6 +177,8 @@ class MediaProcessor:
                 "-loglevel",
                 "error",
                 "-y",
+                "-ss",
+                f"{timestamp:.3f}",
                 "-i",
                 str(video),
                 "-vf",

@@ -78,8 +78,9 @@ class FakeMedia:
             frames.append(frame)
         return frames
 
-    async def thumbnail(self, video, destination):
+    async def thumbnail(self, video, duration, destination):
         assert video.name == "video.mp4"
+        assert duration == 180
         destination.write_bytes(b"thumbnail")
         return destination
 

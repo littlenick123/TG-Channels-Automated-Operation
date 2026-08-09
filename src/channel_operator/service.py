@@ -131,7 +131,9 @@ class AutomationService:
             output = directory / "video.mp4"
             output_info = await self.media.transcode(source, output, source_info)
             frames = await self.media.screenshots(output, output_info.duration, directory)
-            thumbnail = await self.media.thumbnail(output, directory / "video_thumb.jpg")
+            thumbnail = await self.media.thumbnail(
+                output, output_info.duration, directory / "video_thumb.jpg"
+            )
 
             upload_started_at = self.database.begin_upload(
                 self.source_key, group.grouped_id, caption.html, caption.plain

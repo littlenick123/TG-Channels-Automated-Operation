@@ -15,8 +15,8 @@ daily_success_count = 4
 [processing]
 ffmpeg_path = "ffmpeg"
 ffprobe_path = "ffprobe"
-ffmpeg_threads = 3
-crf = 23
+ffmpeg_threads = 4
+crf = 24
 preset = "medium"
 audio_bitrate = "128k"
 minimum_source_short_edge = 1080

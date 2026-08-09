@@ -9,8 +9,10 @@ from channel_operator.media import THUMBNAIL_MAX_BYTES, MediaProcessor
 
 
 def test_screenshot_time_rules():
-    assert MediaProcessor.screenshot_times(200) == (20, 100, 140)
-    assert MediaProcessor.screenshot_times(100) == (10, 50, 90)
+    assert MediaProcessor.thumbnail_time(200) == 20
+    assert MediaProcessor.screenshot_times(200) == (30, 100, 170)
+    assert MediaProcessor.thumbnail_time(100) == 10
+    assert MediaProcessor.screenshot_times(100) == (15, 50, 85)
 
 
 @pytest.mark.asyncio
@@ -43,7 +45,9 @@ async def test_transcode_and_extract_three_frames(app_config, tmp_path: Path):
     output = tmp_path / "video.mp4"
     output_info = await processor.transcode(source, output, source_info)
     frames = await processor.screenshots(output, output_info.duration, tmp_path)
-    thumbnail = await processor.thumbnail(output, tmp_path / "video_thumb.jpg")
+    thumbnail = await processor.thumbnail(
+        output, output_info.duration, tmp_path / "video_thumb.jpg"
+    )
 
     assert (output_info.width, output_info.height) == (1280, 720)
     assert len(frames) == 3
