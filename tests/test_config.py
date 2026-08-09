@@ -13,7 +13,7 @@ drop_tags = ["#删除"]
 [schedule]
 daily_time = "00:01"
 [reporting]
-chat_id = 123456789
+chat_ids = [123456789, 987654321]
 [processing]
 ffmpeg_threads = 3
 [runtime]
@@ -44,7 +44,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
         tmp_path / "data/channel_b.db"
     ).resolve()
     assert config.channel_groups[0].daily_success_count == 4
-    assert config.reporting.chat_id == 123456789
+    assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.download_concurrency == 4
     assert config.flood_sleep_threshold_seconds == 60
 
@@ -199,4 +199,47 @@ def test_report_bot_token_is_required(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TG_REPORT_BOT_TOKEN", raising=False)
 
     with pytest.raises(ConfigError, match="TG_REPORT_BOT_TOKEN"):
+        load_config(path)
+
+
+def test_legacy_single_report_chat_id_is_supported(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            "chat_ids = [123456789, 987654321]", "chat_id = 123456789"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    assert load_config(path).reporting.chat_ids == (123456789,)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    [
+        ("chat_ids = []", "非空整数数组"),
+        ("chat_ids = [123, 123]", "不能包含重复值"),
+        ("chat_ids = [123, -456]", "全部是正整数"),
+        (
+            "chat_id = 123\nchat_ids = [456]",
+            "不能同时配置",
+        ),
+    ],
+)
+def test_report_chat_ids_validation(
+    replacement: str, message: str, tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace("chat_ids = [123456789, 987654321]", replacement),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
         load_config(path)

@@ -8,7 +8,7 @@ timezone = "Asia/Shanghai"
 daily_time = "00:01"
 
 [reporting]
-chat_id = 123456789
+chat_ids = [123456789]
 
 [processing]
 ffmpeg_path = "ffmpeg"

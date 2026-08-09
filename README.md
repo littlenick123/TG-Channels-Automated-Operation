@@ -149,7 +149,7 @@ curl -sS -X POST "https://api.telegram.org/bot${TG_REPORT_BOT_TOKEN}/getUpdates"
 }
 ```
 
-这个正整数就是私人 `chat_id`。把它写入 `config.toml` 的 `[reporting] chat_id`。不要公开完整的 `getUpdates` 输出，因为其中可能包含私人消息和账号信息。
+这个正整数就是私人 `chat_id`。把一个或多个 ID 写入 `config.toml` 的 `[reporting] chat_ids` 数组。不要公开完整的 `getUpdates` 输出，因为其中可能包含私人消息和账号信息。
 
 ### 4. 准备频道权限
 
@@ -317,15 +317,20 @@ daily_time = "00:01"
 
 ```toml
 [reporting]
-chat_id = 123456789
+chat_ids = [
+  123456789,
+  987654321,
+]
 ```
 
-#### `chat_id`
+#### `chat_ids`
 
-- 接收报告的私人 Telegram chat ID。
-- 当前配置要求是正整数。
-- 你必须先向报告机器人发送 `/start`，否则机器人无法主动给你发送消息。
-- `doctor` 会调用 Bot API 验证 Token，并真实发送一条测试消息。
+- 接收报告的私人 Telegram chat ID 数组，至少配置一个。
+- 每个值都必须是互不重复的正整数。
+- 每个接收人都必须先向报告机器人发送 `/start`，否则机器人无法主动给该用户发送消息。
+- 所有告警和最终摘要都会按配置顺序发送给数组中的每个接收人。
+- `doctor` 会调用 Bot API 验证 Token，并向每个 `chat_id` 真实发送一条测试消息。
+- 旧写法 `chat_id = 123456789` 仍兼容，但不能与 `chat_ids` 同时配置；新配置建议统一使用 `chat_ids`。
 
 机器人发送的内容包括：
 
@@ -502,7 +507,7 @@ timezone = "Asia/Shanghai"
 daily_time = "00:01"
 
 [reporting]
-chat_id = 123456789
+chat_ids = [123456789, 987654321]
 
 [processing]
 ffmpeg_path = "ffmpeg"
@@ -639,7 +644,7 @@ F：1 组
 - FFmpeg 和 FFprobe 是否可执行。
 - Telethon 用户会话是否已经登录。
 - 报告机器人 Token 是否有效。
-- 报告机器人能否向私人 `chat_id` 发送消息。
+- 报告机器人能否向所有私人 `chat_ids` 发送消息。
 - 源频道和目标频道是否可解析。
 - 用户账号是否具有目标频道发帖权限。
 - 数据库目录是否可写。
@@ -1258,12 +1263,13 @@ git pull --ff-only
 - 检查 BotFather 是否已经撤销或重新生成 Token。
 - 修改 Token 后重新运行 `doctor`。
 
-### 报告机器人提示 `chat not found` 或收不到消息
+### 报告机器人提示 `chat not found` 或部分接收人收不到消息
 
-- 先打开机器人并发送 `/start`。
-- 确认 `[reporting] chat_id` 是你的私人正整数 ID，不是频道 ID。
-- 再次调用 `getUpdates` 检查 ID。
-- 运行 `doctor`，它会真实发送测试消息。
+- 让 `chat_ids` 数组中的每个接收人分别打开机器人并发送 `/start`。
+- 确认每个 ID 都是对应用户的私人正整数 ID，不是频道 ID。
+- 分别让接收人向机器人发送消息，再调用 `getUpdates` 检查 ID。
+- 检查数组中没有重复值，也没有同时保留旧的 `chat_id`。
+- 运行 `doctor`；它会向数组中的每个接收人真实发送测试消息。
 
 ### `Telethon 会话尚未登录`
 

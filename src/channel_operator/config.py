@@ -68,7 +68,7 @@ class ChannelGroupConfig:
 @dataclass(frozen=True, slots=True)
 class ReportingConfig:
     bot_token: str
-    chat_id: int
+    chat_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,14 +202,26 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     report_bot_token = os.getenv("TG_REPORT_BOT_TOKEN", "").strip()
     if not report_bot_token:
         raise ConfigError(".env 中必须设置 TG_REPORT_BOT_TOKEN")
+    has_chat_id = "chat_id" in reporting
+    has_chat_ids = "chat_ids" in reporting
+    if has_chat_id and has_chat_ids:
+        raise ConfigError("reporting.chat_id 与 reporting.chat_ids 不能同时配置")
+    if has_chat_ids:
+        raw_chat_ids = reporting["chat_ids"]
+        if not isinstance(raw_chat_ids, list) or not raw_chat_ids:
+            raise ConfigError("reporting.chat_ids 必须是非空整数数组")
+    elif has_chat_id:
+        raw_chat_ids = [reporting["chat_id"]]
+    else:
+        raise ConfigError("缺少配置项 reporting.chat_ids")
     try:
-        report_chat_id = int(reporting["chat_id"])
-    except KeyError as exc:
-        raise ConfigError("缺少配置项 reporting.chat_id") from exc
+        report_chat_ids = tuple(int(value) for value in raw_chat_ids)
     except (TypeError, ValueError) as exc:
-        raise ConfigError("reporting.chat_id 必须是整数") from exc
-    if report_chat_id <= 0:
-        raise ConfigError("私人会话 reporting.chat_id 必须是正整数")
+        raise ConfigError("reporting.chat_ids 必须全部是整数") from exc
+    if any(chat_id <= 0 for chat_id in report_chat_ids):
+        raise ConfigError("私人会话 reporting.chat_ids 必须全部是正整数")
+    if len(set(report_chat_ids)) != len(report_chat_ids):
+        raise ConfigError("reporting.chat_ids 不能包含重复值")
 
     config = AppConfig(
         api_id=api_id,
@@ -217,7 +229,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         phone=os.getenv("TG_PHONE") or None,
         session_path=_resolve_path(base, os.getenv("TG_SESSION_PATH", "./data/telegram-user")),
         channel_groups=tuple(channel_groups),
-        reporting=ReportingConfig(report_bot_token, report_chat_id),
+        reporting=ReportingConfig(report_bot_token, report_chat_ids),
         keep_tags=keep_tags,
         drop_tags=drop_tags,
         caption_limit=int(content.get("caption_limit", 1024)),

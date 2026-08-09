@@ -80,7 +80,7 @@ class BotReporter:
             remaining = remaining[split_at:].lstrip()
         return chunks
 
-    async def _send_chunk(self, text: str, *, strict: bool) -> bool:
+    async def _send_chunk(self, chat_id: int, text: str, *, strict: bool) -> bool:
         delays = (0, 2, 10)
         last_error: ReporterError | None = None
         for index, delay in enumerate(delays):
@@ -89,7 +89,7 @@ class BotReporter:
             try:
                 await self._call(
                     "sendMessage",
-                    {"chat_id": self.config.chat_id, "text": text},
+                    {"chat_id": chat_id, "text": text},
                 )
                 return True
             except ReporterError as exc:
@@ -99,16 +99,19 @@ class BotReporter:
         if strict:
             raise last_error or ReporterError("Bot API 发送失败")
         LOGGER.error(
-            "机器人报告发送失败：%s",
+            "机器人报告向 chat_id=%s 发送失败：%s",
+            chat_id,
             last_error or "未知错误",
         )
         return False
 
     async def send(self, text: str, *, strict: bool = False) -> bool:
         delivered = True
-        for chunk in self._split_text(text):
-            if not await self._send_chunk(chunk, strict=strict):
-                delivered = False
+        chunks = self._split_text(text)
+        for chat_id in self.config.chat_ids:
+            for chunk in chunks:
+                if not await self._send_chunk(chat_id, chunk, strict=strict):
+                    delivered = False
         return delivered
 
     async def doctor(self) -> str:
