@@ -17,12 +17,12 @@ chat_id = 123456789
 [processing]
 ffmpeg_threads = 3
 [runtime]
+database_dir = "./data"
 work_dir = "./work"
 [[channel_groups]]
 name = "channel_b"
 source_channel = -1001
 target_channel = -1002
-database_path = "./data/channel_b.db"
 daily_success_count = 4
 """
 
@@ -39,6 +39,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.keep_tags == ("#保留",)
     assert config.daily_time == "00:01"
     assert [group.name for group in config.channel_groups] == ["channel_b"]
+    assert config.database_dir == (tmp_path / "data").resolve()
     assert config.channel_groups[0].database_path == (
         tmp_path / "data/channel_b.db"
     ).resolve()
@@ -114,7 +115,7 @@ def test_download_concurrency_must_be_between_one_and_eight(
         load_config(path)
 
 
-def test_channel_group_order_is_preserved_and_databases_must_be_unique(
+def test_channel_group_order_is_preserved_and_database_names_are_automatic(
     tmp_path: Path, monkeypatch
 ):
     second_group = """
@@ -122,7 +123,6 @@ def test_channel_group_order_is_preserved_and_databases_must_be_unique(
 name = "channel_c"
 source_channel = -1001
 target_channel = -1003
-database_path = "./data/channel_c.db"
 daily_success_count = 2
 """
     path = tmp_path / "config.toml"
@@ -134,15 +134,46 @@ daily_success_count = 2
     config = load_config(path)
 
     assert [group.name for group in config.channel_groups] == ["channel_b", "channel_c"]
+    assert [group.database_path.name for group in config.channel_groups] == [
+        "channel_b.db",
+        "channel_c.db",
+    ]
 
+
+def test_per_group_database_path_is_rejected(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
     path.write_text(
-        (BASE_CONFIG + second_group).replace(
-            'database_path = "./data/channel_c.db"',
-            'database_path = "./data/channel_b.db"',
+        BASE_CONFIG.replace(
+            'target_channel = -1002',
+            'target_channel = -1002\ndatabase_path = "./legacy.db"',
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigError, match="数据库路径不能重复"):
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="不再使用 database_path"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0, 1025])
+def test_caption_limit_must_be_between_one_and_1024(
+    value: int, tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'drop_tags = ["#删除"]',
+            f'drop_tags = ["#删除"]\ncaption_limit = {value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="caption_limit"):
         load_config(path)
 
 

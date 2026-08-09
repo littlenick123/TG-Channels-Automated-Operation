@@ -57,7 +57,7 @@ def test_missing_intro_and_too_few_tags_are_allowed():
     assert "其他" not in result.plain
 
 
-def test_html_is_escaped_and_intro_is_limited_in_utf16_units():
+def test_html_is_escaped_and_truncated_intro_ends_with_ellipsis():
     result = build_caption(
         "简介：<b>😀😀😀</b>",
         [],
@@ -65,8 +65,22 @@ def test_html_is_escaped_and_intro_is_limited_in_utf16_units():
         limit=7,
     )
 
-    assert result.plain == "<b>😀😀"
-    assert result.html == "<blockquote>&lt;b&gt;😀😀</blockquote>"
+    assert result.plain == "<b>..."
+    assert result.html == "<blockquote>&lt;b&gt;...</blockquote>"
+
+
+def test_long_caption_stays_within_limit_and_marks_omitted_content():
+    result = build_caption(
+        "标签：#保留\n简介：" + "内容" * 600,
+        [],
+        [],
+        limit=1024,
+        random_source=FirstRandom(),
+    )
+
+    assert result.plain.endswith("...")
+    assert len(result.plain.encode("utf-16-le")) // 2 <= 1024
+    assert result.html.endswith("...</blockquote>")
 
 
 def test_only_first_hashtag_leading_line_is_used():

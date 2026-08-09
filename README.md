@@ -48,7 +48,7 @@
 - 按标签过滤规则和简介规则生成新文案。
 - 使用一次 Telethon 相册发送，将视频和三张截图作为同一个媒体组发布。
 - 文案只附在媒体组第一个视频上，视频启用流式播放。
-- 每个频道组分别配置每日成功数量和数据库。
+- 每个频道组分别配置每日成功数量，并按唯一组名自动创建独立数据库。
 - 频道被封、不可访问、无发帖权限或数据库异常时跳过当前频道组并继续后续组。
 - 使用独立 Telegram Bot API 机器人向私人会话发送即时告警和最终汇总。
 - 使用全局进程锁防止两个任务同时运行。
@@ -266,9 +266,11 @@ caption_limit = 1024
 
 #### `caption_limit`
 
-- 目标文案长度限制，默认和推荐值为 `1024`。
-- 超出限制时优先保留标签，只截断简介。
-- 必须大于 0。
+- 目标媒体说明长度限制，允许范围为 `1–1024`，默认和推荐值为 `1024`。
+- Telegram 当前对普通用户的媒体说明限制为 1024；Premium 用户的 MTProto 配置上限更高，但本项目固定以 1024 为最高值，以兼容普通账号和不同发送环境。可参考 Telegram 的[客户端配置说明](https://core.telegram.org/api/config)。
+- 超出限制时优先完整保留标签，只缩短简介，并在被省略内容的位置以 `...` 结尾。
+- `...` 本身也计入 1024 的长度，因此最终发送的文案不会因为添加省略号而超过限制。
+- 长度按 Telegram 实体使用的 UTF-16 单元计算；中文、英文通常各占 1，部分 Emoji 占 2。
 
 源文案支持以下标签行：
 
@@ -376,6 +378,7 @@ disk_reserve_bytes = 1073741824
 
 ```toml
 [runtime]
+database_dir = "/var/lib/channel-operator"
 work_dir = "/var/cache/channel-operator/work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
@@ -383,6 +386,14 @@ download_concurrency = 4
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 600]
 ```
+
+#### `database_dir`
+
+- 所有频道组 SQLite 数据库的统一保存目录。
+- 默认值为 `./data`；相对路径以 `config.toml` 所在目录为基准。
+- 数据库文件名不再手工配置，而是自动使用 `<频道组名称>.db`。
+- 例如 `database_dir = "/var/lib/channel-operator"` 且组名为 `channel_b`，实际数据库为 `/var/lib/channel-operator/channel_b.db`。
+- 生产环境运行用户必须拥有该目录的读写权限。
 
 #### `work_dir`
 
@@ -433,7 +444,6 @@ retry_delays_seconds = [30, 120, 600]
 name = "channel_b"
 source_channel = -1001234567890
 target_channel = -1009876543210
-database_path = "/var/lib/channel-operator/channel_b.db"
 daily_success_count = 4
 ```
 
@@ -442,8 +452,14 @@ daily_success_count = 4
 | `name` | 是 | 频道组唯一名称，长度 1–64，只允许字母、数字、下划线和连字符，且首字符必须是字母或数字。 |
 | `source_channel` | 是 | 源频道数字 ID 或用户名。多个频道组可以使用同一个源频道。 |
 | `target_channel` | 是 | 目标频道数字 ID 或用户名。用户账号必须具有发帖权限。 |
-| `database_path` | 是 | 当前频道组专用 SQLite 路径，所有频道组之间必须唯一。 |
 | `daily_success_count` | 是 | 当前频道组每天希望达到的成功发布数量，必须大于 0 且不能超过 `max_candidates_per_run`。 |
+
+不允许再在 `[[channel_groups]]` 中配置 `database_path`。每个组的 `name` 必须唯一，程序会在全局 `database_dir` 下自动创建同名数据库。例如：
+
+```text
+channel_b → /var/lib/channel-operator/channel_b.db
+channel_c → /var/lib/channel-operator/channel_c.db
+```
 
 频道组的书写顺序就是运行顺序。以下配置一定先完成 `channel_b`，再开始 `channel_c`：
 
@@ -464,7 +480,7 @@ name = "channel_c"
 - 今天已经成功 4 组：本次不再发布，随后进入下一频道组。
 - 明天运行：按新日期重新以 4 组为目标。
 
-每个数据库还会保存频道组名称、源频道和目标频道身份。如果把 `channel_b.db` 错误配置给 `channel_c`，程序会拒绝运行该组并通过机器人告警，避免状态串用。
+每个数据库还会保存频道组名称、源频道和目标频道身份。如果修改了已有组的源频道或目标频道，但继续使用相同组名，程序会拒绝运行该组并通过机器人告警，避免状态串用。
 
 ## 五个目标频道的完整配置示例
 
@@ -500,6 +516,7 @@ album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
 
 [runtime]
+database_dir = "/var/lib/channel-operator"
 work_dir = "/var/cache/channel-operator/work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
@@ -511,35 +528,30 @@ retry_delays_seconds = [30, 120, 600]
 name = "channel_b"
 source_channel = -1001111111111
 target_channel = -1002222222222
-database_path = "/var/lib/channel-operator/channel_b.db"
 daily_success_count = 4
 
 [[channel_groups]]
 name = "channel_c"
 source_channel = -1001111111111
 target_channel = -1003333333333
-database_path = "/var/lib/channel-operator/channel_c.db"
 daily_success_count = 4
 
 [[channel_groups]]
 name = "channel_d"
 source_channel = -1001111111111
 target_channel = -1004444444444
-database_path = "/var/lib/channel-operator/channel_d.db"
 daily_success_count = 3
 
 [[channel_groups]]
 name = "channel_e"
 source_channel = -1001111111111
 target_channel = -1005555555555
-database_path = "/var/lib/channel-operator/channel_e.db"
 daily_success_count = 2
 
 [[channel_groups]]
 name = "channel_f"
 source_channel = -1001111111111
 target_channel = -1006666666666
-database_path = "/var/lib/channel-operator/channel_f.db"
 daily_success_count = 1
 ```
 
@@ -739,7 +751,7 @@ echo $?
 - FFmpeg/FFprobe 输出正常。
 - 每个频道组的 `post_permission` 为 `ok`。
 - 私人 Telegram 会话收到机器人测试消息。
-- 每个数据库路径正确。
+- 每个频道组显示的自动数据库路径正确。
 
 ### 3. 建立索引
 
@@ -763,7 +775,7 @@ echo $?
 
 ### 5. 在测试频道正式发布
 
-建议先把目标 ID 配置为测试频道，并使用全新的测试数据库路径：
+建议先把目标 ID 配置为测试频道，并为测试关系使用一个全新的频道组名称，使程序自动创建新的测试数据库：
 
 ```bash
 .venv/bin/channel-operator --config config.toml run-once --group channel_b
@@ -963,15 +975,15 @@ TG_REPORT_BOT_TOKEN=替换为真实机器人Token
 
 ```toml
 [runtime]
+database_dir = "/var/lib/channel-operator"
 work_dir = "/var/cache/channel-operator/work"
 
 [[channel_groups]]
 name = "channel_b"
-database_path = "/var/lib/channel-operator/channel_b.db"
 # 其余字段按实际填写
 ```
 
-每新增一个频道组，都必须使用新的数据库文件名。
+每新增一个频道组，只需要使用新的唯一 `name`。程序会自动创建 `/var/lib/channel-operator/<name>.db`，不需要也不允许在频道组中填写 `database_path`。
 
 ### 5. 登录 Telethon 用户账号
 
@@ -1001,7 +1013,7 @@ sudo -u channel-operator /opt/telegram-channel-operator/.venv/bin/channel-operat
   --config /etc/channel-operator/config.toml doctor
 ```
 
-此时私人 Telegram 应收到机器人测试消息。任何频道组显示 `ERROR` 时，不要启用定时任务，先修复频道 ID、权限或数据库路径。
+此时私人 Telegram 应收到机器人测试消息。任何频道组显示 `ERROR` 时，不要启用定时任务，先修复频道 ID、权限或 `database_dir` 权限。
 
 ### 7. 建立生产索引和预览
 
@@ -1187,7 +1199,20 @@ daily_success_count = 4
 database_path = "./data/operator.db"
 ```
 
-必须改用一个或多个 `[[channel_groups]]`。按照当前约定，升级时使用全新数据库，不迁移旧数据库；因此新数据库可能重新选中以前发布过的素材。
+必须改用一个或多个 `[[channel_groups]]`。新版数据库目录只在 `[runtime]` 中统一配置：
+
+```toml
+[runtime]
+database_dir = "/var/lib/channel-operator"
+
+[[channel_groups]]
+name = "channel_b"
+source_channel = -1001111111111
+target_channel = -1002222222222
+daily_success_count = 4
+```
+
+如果升级前已经在每个 `[[channel_groups]]` 中配置了 `database_path`，请删除这些行，并确保旧数据库文件名正好是 `<name>.db` 后放入 `database_dir`。例如 `channel_b` 对应 `channel_b.db`。文件名符合规则时可以继续使用原数据库；不要在程序运行时移动数据库及其 `-wal`、`-shm` 文件。
 
 ### 6. 验证并重新启用
 
@@ -1224,7 +1249,7 @@ git pull --ff-only
 
 ### `必须配置至少一个 [[channel_groups]]`
 
-说明仍在使用旧版单频道 TOML。参照本文完整示例，把源频道、目标频道、数据库和每日数量移动到 `[[channel_groups]]`。
+说明仍在使用旧版单频道 TOML。参照本文完整示例，把源频道、目标频道和每日数量移动到 `[[channel_groups]]`，数据库目录配置到 `[runtime] database_dir`。
 
 ### `TG_REPORT_BOT_TOKEN` 缺失或 `Unauthorized`
 
@@ -1265,13 +1290,19 @@ systemd 部署时必须使用与 service 相同的 `channel-operator` 用户登�
 
 ### 数据库身份不匹配
 
-不要把一个目标频道已有的数据库直接配置给另一个频道组。为新组使用新的路径，例如：
+数据库文件会根据频道组名称自动定位。如果保留相同 `name`，却修改了源频道或目标频道，已有数据库中的身份信息会与新配置冲突。
+
+为新频道关系使用新的组名，例如：
 
 ```toml
-database_path = "/var/lib/channel-operator/channel_new.db"
+[[channel_groups]]
+name = "channel_new"
+source_channel = -1001111111111
+target_channel = -1009999999999
+daily_success_count = 4
 ```
 
-如果确认旧数据库不再需要，先备份，再改用新文件名。不要在程序运行时删除数据库。
+它会自动使用 `/var/lib/channel-operator/channel_new.db`。如果确认旧数据库不再需要，应先停止任务并备份，再处理旧文件；不要在程序运行时删除数据库。
 
 ### 磁盘空间不足
 

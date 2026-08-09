@@ -93,6 +93,7 @@ class AppConfig:
     minimum_source_short_edge: int
     album_settle_seconds: int
     disk_reserve_bytes: int
+    database_dir: Path
     work_dir: Path
     max_candidates_per_run: int
     max_runtime_hours: float
@@ -122,6 +123,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     runtime = _section(data, "runtime")
     reporting = _section(data, "reporting")
     base = config_path.parent
+    database_dir = _resolve_path(base, str(runtime.get("database_dir", "./data")))
 
     api_id_raw = os.getenv("TG_API_ID", "")
     api_hash = os.getenv("TG_API_HASH", "").strip()
@@ -161,7 +163,6 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             name = str(raw_group["name"]).strip()
             source_channel = _channel(raw_group["source_channel"])
             target_channel = _channel(raw_group["target_channel"])
-            database_path = _resolve_path(base, str(raw_group["database_path"]))
             daily_success_count = int(raw_group["daily_success_count"])
         except KeyError as exc:
             raise ConfigError(
@@ -175,6 +176,12 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             )
         if name in names:
             raise ConfigError(f"频道组名称不能重复：{name}")
+        if "database_path" in raw_group:
+            raise ConfigError(
+                f"频道组 {name} 不再使用 database_path；"
+                "请在 [runtime] 中统一配置 database_dir"
+            )
+        database_path = database_dir / f"{name}.db"
         path_key = os.path.normcase(str(database_path))
         if path_key in database_paths:
             raise ConfigError(f"频道组数据库路径不能重复：{database_path}")
@@ -225,6 +232,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         minimum_source_short_edge=int(processing.get("minimum_source_short_edge", 1080)),
         album_settle_seconds=int(processing.get("album_settle_seconds", 300)),
         disk_reserve_bytes=int(processing.get("disk_reserve_bytes", 1_073_741_824)),
+        database_dir=database_dir,
         work_dir=_resolve_path(base, str(runtime.get("work_dir", "./work"))),
         max_candidates_per_run=int(runtime.get("max_candidates_per_run", 12)),
         max_runtime_hours=float(runtime.get("max_runtime_hours", 6)),
@@ -250,8 +258,8 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("4C VPS 的 ffmpeg_threads 必须在 1 到 4 之间")
     if not 0 <= config.crf <= 51:
         raise ConfigError("CRF 必须在 0 到 51 之间")
-    if config.caption_limit < 1:
-        raise ConfigError("caption_limit 必须大于 0")
+    if not 1 <= config.caption_limit <= 1024:
+        raise ConfigError("caption_limit 必须在 1 到 1024 之间")
     if not 1 <= config.download_concurrency <= 8:
         raise ConfigError("download_concurrency 必须在 1 到 8 之间")
     if not 1 <= config.flood_sleep_threshold_seconds <= 86_400:

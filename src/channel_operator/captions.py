@@ -38,6 +38,19 @@ def _truncate_utf16(value: str, limit: int) -> str:
     return "".join(result).rstrip()
 
 
+def _truncate_utf16_with_ellipsis(value: str, limit: int) -> str:
+    if _utf16_length(value) <= limit:
+        return value
+    if limit <= 0:
+        return ""
+    ellipsis = "..."
+    ellipsis_units = _utf16_length(ellipsis)
+    if limit < ellipsis_units:
+        return "." * limit
+    prefix = _truncate_utf16(value, limit - ellipsis_units)
+    return f"{prefix}{ellipsis}"
+
+
 def _source_tags(text: str) -> list[str]:
     unique: dict[str, str] = {}
     for line in text.splitlines():
@@ -102,7 +115,7 @@ def build_caption(
     if intro is not None:
         separator = "\n\n" if tag_line else ""
         available = limit - _utf16_length(tag_line) - _utf16_length(separator)
-        intro = _truncate_utf16(intro, available)
+        intro = _truncate_utf16_with_ellipsis(intro, available)
         if not intro:
             intro = None
 

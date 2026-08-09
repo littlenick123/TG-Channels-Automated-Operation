@@ -43,6 +43,7 @@ def app_config(tmp_path: Path):
         minimum_source_short_edge=1080,
         album_settle_seconds=0,
         disk_reserve_bytes=0,
+        database_dir=tmp_path / "data",
         work_dir=tmp_path / "work",
         max_candidates_per_run=12,
         max_runtime_hours=1,
