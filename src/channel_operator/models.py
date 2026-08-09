@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import ChannelGroupConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,3 +81,27 @@ class RunSummary:
 class DeliveryReceipt:
     message_ids: tuple[int, ...]
     grouped_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class GroupRunResult:
+    group: ChannelGroupConfig
+    summary: RunSummary | None = None
+    skipped_reason: str | None = None
+    published_before_skip: int = 0
+
+    @property
+    def published(self) -> int:
+        return (
+            self.summary.published
+            if self.summary is not None
+            else self.published_before_skip
+        )
+
+    @property
+    def succeeded(self) -> bool:
+        return (
+            self.skipped_reason is None
+            and self.summary is not None
+            and self.summary.published >= self.group.daily_success_count
+        )

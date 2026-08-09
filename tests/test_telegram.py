@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from telethon import utils
+from telethon import errors, utils
 from telethon.tl.types import (
     DocumentAttributeFilename,
     DocumentAttributeVideo,
@@ -13,7 +13,7 @@ from telethon.tl.types import (
 )
 
 from channel_operator.models import DeliveryReceipt, VideoInfo
-from channel_operator.telegram import TelegramGateway
+from channel_operator.telegram import ChannelGroupUnavailable, TelegramGateway
 
 
 class FakeClient:
@@ -43,6 +43,11 @@ class FlakyClient(FakeClient):
     async def send_file(self, entity, files, **kwargs):
         self.calls.append((entity, files, kwargs))
         raise OSError("response was lost")
+
+
+class PrivateChannelClient(FakeClient):
+    async def get_entity(self, entity):
+        raise errors.ChannelPrivateError(request=None)
 
 
 class ResumableDownloadClient(FakeClient):
@@ -107,7 +112,8 @@ class ResumableGateway(TelegramGateway):
 @pytest.mark.asyncio
 async def test_send_album_is_one_call_in_video_then_image_order(app_config, tmp_path: Path):
     client = FakeClient()
-    gateway = TelegramGateway(app_config(), client=client)
+    config = app_config()
+    gateway = TelegramGateway(config, config.channel_groups[0], client=client)
     files = [
         tmp_path / "video.mp4",
         tmp_path / "frame_1.jpg",
@@ -157,7 +163,8 @@ async def test_send_album_is_one_call_in_video_then_image_order(app_config, tmp_
 @pytest.mark.asyncio
 async def test_ambiguous_send_checks_target_before_retrying(app_config, tmp_path: Path):
     client = FlakyClient()
-    gateway = ReconcilingGateway(app_config(), client=client)
+    config = app_config()
+    gateway = ReconcilingGateway(config, config.channel_groups[0], client=client)
     files = [
         tmp_path / "video.mp4",
         tmp_path / "frame_1.jpg",
@@ -191,12 +198,14 @@ async def test_download_resumes_partial_file_after_network_error(app_config, tmp
         + b"tail"
     )
     client = ResumableDownloadClient(data)
+    config = app_config(
+        retry_delays_seconds=(0,),
+        download_concurrency=2,
+        flood_sleep_threshold_seconds=60,
+    )
     gateway = ResumableGateway(
-        app_config(
-            retry_delays_seconds=(0,),
-            download_concurrency=2,
-            flood_sleep_threshold_seconds=60,
-        ),
+        config,
+        config.channel_groups[0],
         client=client,
     )
     destination = tmp_path / "source_video.mp4"
@@ -216,3 +225,16 @@ async def test_download_resumes_partial_file_after_network_error(app_config, tmp
     assert all(call["stride"] == request_size * 2 for call in client.download_calls)
     assert all(call["file_size"] == len(data) for call in client.download_calls)
     assert client.flood_sleep_threshold == 60
+
+
+@pytest.mark.asyncio
+async def test_private_channel_error_is_promoted_to_group_failure(app_config):
+    config = app_config()
+    gateway = TelegramGateway(
+        config,
+        config.channel_groups[0],
+        client=PrivateChannelClient(),
+    )
+
+    with pytest.raises(ChannelGroupUnavailable, match="无法访问"):
+        await gateway._source_entity()

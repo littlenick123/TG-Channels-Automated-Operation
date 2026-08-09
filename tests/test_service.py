@@ -7,6 +7,7 @@ import pytest
 from channel_operator.database import StateDatabase
 from channel_operator.models import DeliveryReceipt, MessageSnapshot, VideoInfo
 from channel_operator.service import AutomationService
+from channel_operator.telegram import ChannelGroupUnavailable
 
 
 class FakeTelegram:
@@ -16,7 +17,6 @@ class FakeTelegram:
         self.sent_caption = None
         self.sent_thumbnail = None
         self.sent_video_info = None
-        self.notifications = []
         self.downloaded_message_ids = []
 
     async def scan_messages(self, min_id):
@@ -49,8 +49,20 @@ class FakeTelegram:
     async def find_matching_album(self, started_at, caption_plain):
         return None
 
-    async def notify(self, text):
-        self.notifications.append(text)
+
+
+class FakeReporter:
+    def __init__(self):
+        self.messages = []
+
+    async def send(self, text, *, strict=False):
+        self.messages.append(text)
+        return True
+
+
+class UnavailableDownloadTelegram(FakeTelegram):
+    async def download_video(self, message_id, destination):
+        raise ChannelGroupUnavailable("源频道已被封禁")
 
 
 class FakeMedia:
@@ -88,6 +100,7 @@ class FakeMedia:
 @pytest.mark.asyncio
 async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_config):
     config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
     snapshot = MessageSnapshot(
         message_id=1,
         grouped_id=123,
@@ -100,9 +113,11 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
         file_size=100,
         published_at=datetime.now(UTC) - timedelta(hours=1),
     )
-    database = StateDatabase(config.database_path)
+    database = StateDatabase(group.database_path)
     telegram = FakeTelegram(snapshot)
-    service = AutomationService(config, database, telegram, FakeMedia(config))
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
 
     summary = await service.run_once()
 
@@ -113,13 +128,14 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
     assert telegram.sent_video_info.display_width == 1280
     assert telegram.sent_video_info.display_height == 720
     assert list(config.work_dir.iterdir()) == []
-    assert database.published_count(str(config.source_channel), summary.run_date) == 1
+    assert database.published_count(str(group.source_channel), summary.run_date) == 1
     database.close()
 
 
 @pytest.mark.asyncio
 async def test_empty_caption_is_rejected_before_download_and_replaced(app_config):
     config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
     published_at = datetime.now(UTC) - timedelta(hours=1)
     empty = MessageSnapshot(
         message_id=1,
@@ -145,25 +161,28 @@ async def test_empty_caption_is_rejected_before_download_and_replaced(app_config
         file_size=100,
         published_at=published_at,
     )
-    database = StateDatabase(config.database_path)
-    database.save_messages(str(config.source_channel), [empty, replacement], 2)
-    database.refresh_groups(str(config.source_channel))
-    database.begin_attempt(str(config.source_channel), empty.grouped_id, "2026-08-09")
+    database = StateDatabase(group.database_path)
+    database.save_messages(str(group.source_channel), [empty, replacement], 2)
+    database.refresh_groups(str(group.source_channel))
+    database.begin_attempt(str(group.source_channel), empty.grouped_id, "2026-08-09")
     telegram = FakeTelegram([empty, replacement])
-    service = AutomationService(config, database, telegram, FakeMedia(config))
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
 
     summary = await service.run_once()
 
     assert summary.published == 1
     assert summary.rejected == 1
     assert telegram.downloaded_message_ids == [replacement.message_id]
-    assert database.counts(str(config.source_channel))["rejected"] == 1
+    assert database.counts(str(group.source_channel))["rejected"] == 1
     database.close()
 
 
 @pytest.mark.asyncio
 async def test_dry_run_filters_empty_caption_and_returns_replacement(app_config):
     config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
     published_at = datetime.now(UTC) - timedelta(hours=1)
     snapshots = [
         MessageSnapshot(
@@ -191,11 +210,51 @@ async def test_dry_run_filters_empty_caption_and_returns_replacement(app_config)
             published_at=published_at,
         ),
     ]
-    database = StateDatabase(config.database_path)
-    service = AutomationService(config, database, FakeTelegram(snapshots), FakeMedia(config))
+    database = StateDatabase(group.database_path)
+    service = AutomationService(
+        config,
+        group,
+        database,
+        FakeTelegram(snapshots),
+        FakeMedia(config),
+        FakeReporter(),
+    )
 
     previews = await service.dry_run()
 
     assert previews == [(222, "#有效\n\n内容")]
-    assert "rejected" not in database.counts(str(config.source_channel))
+    assert "rejected" not in database.counts(str(group.source_channel))
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_failure_aborts_group_and_keeps_media_retryable(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=1,
+        grouped_id=333,
+        caption="标签：#有效\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    database = StateDatabase(group.database_path)
+    service = AutomationService(
+        config,
+        group,
+        database,
+        UnavailableDownloadTelegram(source),
+        FakeMedia(config),
+        FakeReporter(),
+    )
+
+    with pytest.raises(ChannelGroupUnavailable):
+        await service.run_once()
+
+    assert database.counts(str(group.source_channel))["retryable"] == 1
     database.close()

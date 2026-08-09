@@ -12,15 +12,37 @@ from typing import Any
 from .models import MediaGroup, MessageSnapshot
 
 
+class DatabaseIdentityError(RuntimeError):
+    """Raised when a database belongs to a different channel group."""
+
+
 class StateDatabase:
-    def __init__(self, path: Path):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        group_name: str | None = None,
+        source_channel: str | int | None = None,
+        target_channel: str | int | None = None,
+    ):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
+        try:
+            self._migrate()
+            identity = (group_name, source_channel, target_channel)
+            if any(value is not None for value in identity):
+                if any(value is None for value in identity):
+                    raise ValueError("数据库身份必须同时提供频道组名称、源频道和目标频道")
+                self._bind_identity(
+                    str(group_name), str(source_channel), str(target_channel)
+                )
+        except Exception:
+            self.connection.close()
+            raise
 
     def close(self) -> None:
         self.connection.close()
@@ -84,6 +106,36 @@ class StateDatabase:
             """
         )
         self.connection.commit()
+
+    def _bind_identity(
+        self, group_name: str, source_channel: str, target_channel: str
+    ) -> None:
+        expected = {
+            "identity:group_name": group_name,
+            "identity:source_channel": source_channel,
+            "identity:target_channel": target_channel,
+        }
+        placeholders = ",".join("?" for _ in expected)
+        rows = self.connection.execute(
+            f"SELECT key, value FROM metadata WHERE key IN ({placeholders})",
+            tuple(expected),
+        ).fetchall()
+        actual = {str(row["key"]): str(row["value"]) for row in rows}
+        if actual and actual != expected:
+            details = ", ".join(
+                f"{key}={actual.get(key, '[缺失]')}（预期 {value}）"
+                for key, value in expected.items()
+                if actual.get(key) != value
+            )
+            raise DatabaseIdentityError(
+                f"数据库 {self.path} 属于其他频道组：{details}"
+            )
+        if not actual:
+            with self.transaction():
+                self.connection.executemany(
+                    "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                    expected.items(),
+                )
 
     @contextmanager
     def transaction(self):

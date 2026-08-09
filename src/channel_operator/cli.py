@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import logging
 
-from .config import ConfigError, load_config
+from .config import AppConfig, ChannelGroupConfig, ConfigError, load_config
 from .database import StateDatabase
 from .locking import AlreadyRunningError, ProcessLock
 from .media import MediaProcessor
+from .reporting import BotReporter, ReporterError
+from .runner import MultiChannelRunner
 from .service import AutomationService
 from .telegram import TelegramError, TelegramGateway
 
@@ -18,11 +20,50 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--verbose", action="store_true", help="输出调试日志")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("login", help="交互登录 Telegram 用户账号")
-    commands.add_parser("doctor", help="检查配置、依赖和频道权限")
-    commands.add_parser("index", help="建立或更新源频道索引")
+    doctor = commands.add_parser("doctor", help="检查配置、依赖和频道权限")
+    doctor.add_argument("--group", help="只检查指定频道组")
+    index = commands.add_parser("index", help="建立或更新源频道索引")
+    index.add_argument("--group", help="只索引指定频道组")
     run = commands.add_parser("run-once", help="执行一次每日任务")
     run.add_argument("--dry-run", action="store_true", help="仅预览选材和文案")
+    run.add_argument("--group", help="只运行指定频道组")
     return parser
+
+
+def _select_groups(
+    config: AppConfig, selected_name: str | None
+) -> tuple[ChannelGroupConfig, ...]:
+    if selected_name is None:
+        return config.channel_groups
+    selected = tuple(
+        group for group in config.channel_groups if group.name == selected_name
+    )
+    if not selected:
+        available = ", ".join(group.name for group in config.channel_groups)
+        raise ConfigError(f"未知频道组 {selected_name!r}；可用频道组：{available}")
+    return selected
+
+
+def _database(group: ChannelGroupConfig) -> StateDatabase:
+    return StateDatabase(
+        group.database_path,
+        group_name=group.name,
+        source_channel=group.source_channel,
+        target_channel=group.target_channel,
+    )
+
+
+async def _report_group_error(
+    reporter: BotReporter, group: ChannelGroupConfig, operation: str, exc: Exception
+) -> None:
+    await reporter.send(
+        "⚠️ 频道组操作失败，已继续后续组\n"
+        f"操作：{operation}\n"
+        f"组名：{group.name}\n"
+        f"源频道：{group.source_channel}\n"
+        f"目标频道：{group.target_channel}\n"
+        f"错误：{type(exc).__name__}: {exc}"
+    )
 
 
 async def _run(arguments: argparse.Namespace) -> int:
@@ -37,49 +78,105 @@ async def _run(arguments: argparse.Namespace) -> int:
             await telegram.disconnect()
         return 0
 
+    groups = _select_groups(config, getattr(arguments, "group", None))
     await telegram.connect()
-    database: StateDatabase | None = None
+    reporter = BotReporter(config.reporting)
     try:
         if arguments.command == "doctor":
-            config.database_path.parent.mkdir(parents=True, exist_ok=True)
             config.work_dir.mkdir(parents=True, exist_ok=True)
-            database = StateDatabase(config.database_path)
             ffmpeg = await media.version(config.ffmpeg_path)
             ffprobe = await media.version(config.ffprobe_path)
-            checks = await telegram.doctor()
             print(f"FFmpeg: {ffmpeg}")
             print(f"FFprobe: {ffprobe}")
-            for name, value in checks.items():
-                print(f"{name}: {value}")
-            print(f"database: {config.database_path}")
             print(f"work_dir: {config.work_dir}")
             print(f"download_concurrency: {config.download_concurrency}")
-            return 0
+            bot_username = await reporter.doctor()
+            print(f"report_bot: @{bot_username}")
+            failed = False
+            for group in groups:
+                database: StateDatabase | None = None
+                try:
+                    database = _database(group)
+                    checks = await telegram.for_group(group).doctor()
+                    print(f"\n[{group.name}]")
+                    for name, value in checks.items():
+                        print(f"{name}: {value}")
+                    print(f"database: {group.database_path}")
+                except Exception as exc:
+                    failed = True
+                    logging.exception("频道组 %s 检查失败", group.name)
+                    print(f"\n[{group.name}] ERROR: {type(exc).__name__}: {exc}")
+                    await _report_group_error(reporter, group, "doctor", exc)
+                finally:
+                    if database is not None:
+                        database.close()
+            return 2 if failed else 0
 
-        lock_path = config.database_path.with_suffix(config.database_path.suffix + ".lock")
+        lock_path = config.work_dir / ".channel-operator.lock"
         with ProcessLock(lock_path):
-            database = StateDatabase(config.database_path)
-            service = AutomationService(config, database, telegram, media)
             if arguments.command == "index":
-                count = await service.index()
-                print(f"索引完成，共 {count} 个媒体组")
-                return 0
+                failed = False
+                for group in groups:
+                    database: StateDatabase | None = None
+                    try:
+                        database = _database(group)
+                        service = AutomationService(
+                            config,
+                            group,
+                            database,
+                            telegram.for_group(group),
+                            media,
+                            reporter,
+                        )
+                        count = await service.index()
+                        print(f"[{group.name}] 索引完成，共 {count} 个媒体组")
+                    except Exception as exc:
+                        failed = True
+                        logging.exception("频道组 %s 索引失败", group.name)
+                        await _report_group_error(reporter, group, "index", exc)
+                    finally:
+                        if database is not None:
+                            database.close()
+                return 2 if failed else 0
             if arguments.dry_run:
-                previews = await service.dry_run()
-                if not previews:
-                    print("没有符合条件的未处理媒体组")
-                for grouped_id, caption in previews:
-                    print(f"\n媒体组 {grouped_id}\n{caption or '[空文案]'}")
-                return 0
-            summary = await service.run_once()
-            print(
-                f"任务结束：{summary.run_date} 成功 {summary.published}/"
-                f"{config.daily_success_count}，本次尝试 {summary.attempted}"
-            )
-            return 0 if summary.published >= config.daily_success_count else 2
+                failed = False
+                for group in groups:
+                    database: StateDatabase | None = None
+                    try:
+                        database = _database(group)
+                        service = AutomationService(
+                            config,
+                            group,
+                            database,
+                            telegram.for_group(group),
+                            media,
+                            reporter,
+                        )
+                        previews = await service.dry_run()
+                        print(f"\n[{group.name}]")
+                        if not previews:
+                            print("没有符合条件的未处理媒体组")
+                        for grouped_id, caption in previews:
+                            print(f"\n媒体组 {grouped_id}\n{caption or '[空文案]'}")
+                    except Exception as exc:
+                        failed = True
+                        logging.exception("频道组 %s 预览失败", group.name)
+                        await _report_group_error(reporter, group, "dry-run", exc)
+                    finally:
+                        if database is not None:
+                            database.close()
+                return 2 if failed else 0
+            runner = MultiChannelRunner(config, telegram, media, reporter)
+            results = await runner.run_once(groups)
+            for result in results:
+                status = "已跳过" if result.skipped_reason else "完成"
+                print(
+                    f"[{result.group.name}] {status}：成功 {result.published}/"
+                    f"{result.group.daily_success_count}"
+                )
+            return 0 if all(result.succeeded for result in results) else 2
     finally:
-        if database is not None:
-            database.close()
+        await reporter.close()
         await telegram.disconnect()
 
 
@@ -89,9 +186,14 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.DEBUG if arguments.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # The Bot API token is part of the request URL. HTTPX's INFO/DEBUG request
+    # logging would expose it, so all reporter failures are logged by our
+    # sanitized wrapper instead.
+    logging.getLogger("httpx").setLevel(logging.CRITICAL)
+    logging.getLogger("httpcore").setLevel(logging.CRITICAL)
     try:
         code = asyncio.run(_run(arguments))
-    except (ConfigError, TelegramError, AlreadyRunningError) as exc:
+    except (ConfigError, TelegramError, ReporterError, AlreadyRunningError) as exc:
         logging.error("%s", exc)
         code = 1
     except KeyboardInterrupt:

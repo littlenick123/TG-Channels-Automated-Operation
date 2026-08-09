@@ -17,13 +17,23 @@ from telethon.tl.types import (
     InputMediaUploadedDocument,
 )
 
-from .config import AppConfig
+from .config import AppConfig, ChannelGroupConfig
 from .models import DeliveryReceipt, MessageSnapshot, VideoInfo
 
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
 FLOOD_WAIT_ERRORS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
+CHANNEL_GROUP_ERRORS = (
+    errors.ChannelBannedError,
+    errors.ChannelPrivateError,
+    errors.ChannelInvalidError,
+    errors.ChatWriteForbiddenError,
+    errors.ChatAdminRequiredError,
+    errors.UserBannedInChannelError,
+    errors.PeerIdInvalidError,
+    errors.ChatForbiddenError,
+)
 
 
 class TelegramError(RuntimeError):
@@ -34,9 +44,20 @@ class SourceMediaUnavailable(TelegramError):
     """Raised when a selected source message was removed or changed."""
 
 
+class ChannelGroupUnavailable(TelegramError):
+    """Raised when a configured source or target channel cannot be used."""
+
+
 class TelegramGateway:
-    def __init__(self, config: AppConfig, client: TelegramClient | None = None):
+    def __init__(
+        self,
+        config: AppConfig,
+        group: ChannelGroupConfig | None = None,
+        client: TelegramClient | None = None,
+        entity_cache: dict[str | int, Any] | None = None,
+    ):
         self.config = config
+        self.group = group
         config.session_path.parent.mkdir(parents=True, exist_ok=True)
         if client is None:
             self.client = TelegramClient(
@@ -48,8 +69,20 @@ class TelegramGateway:
         else:
             self.client = client
             self.client.flood_sleep_threshold = config.flood_sleep_threshold_seconds
-        self._source: Any = None
-        self._target: Any = None
+        self._entities = entity_cache if entity_cache is not None else {}
+
+    def for_group(self, group: ChannelGroupConfig) -> TelegramGateway:
+        return TelegramGateway(
+            self.config,
+            group,
+            client=self.client,
+            entity_cache=self._entities,
+        )
+
+    def _require_group(self) -> ChannelGroupConfig:
+        if self.group is None:
+            raise RuntimeError("当前 TelegramGateway 尚未绑定频道组")
+        return self.group
 
     async def login(self) -> None:
         await self.client.start(phone=self.config.phone)
@@ -72,24 +105,35 @@ class TelegramGateway:
             await self.client.disconnect()
 
     async def _source_entity(self) -> Any:
-        if self._source is None:
-            self._source = await self._resolve_entity(self.config.source_channel)
-        return self._source
+        return await self._resolve_entity(self._require_group().source_channel)
 
     async def _target_entity(self) -> Any:
-        if self._target is None:
-            self._target = await self._resolve_entity(self.config.target_channel)
-        return self._target
+        return await self._resolve_entity(self._require_group().target_channel)
 
     async def _resolve_entity(self, identifier: str | int) -> Any:
+        if identifier in self._entities:
+            return self._entities[identifier]
         try:
-            return await self.client.get_entity(identifier)
+            entity = await self.client.get_entity(identifier)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"频道 {identifier} 无法访问：{type(exc).__name__}: {exc}"
+            ) from exc
         except ValueError:
             # A fresh Telethon session may not yet know the access hash for a
             # private channel referenced only by its numeric ID. Loading dialogs
             # populates the session entity cache before the second lookup.
-            await self.client.get_dialogs(limit=None)
-            return await self.client.get_entity(identifier)
+            try:
+                await self.client.get_dialogs(limit=None)
+                entity = await self.client.get_entity(identifier)
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"频道 {identifier} 无法访问：{type(exc).__name__}: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise ChannelGroupUnavailable(f"无法解析频道 {identifier}") from exc
+        self._entities[identifier] = entity
+        return entity
 
     @staticmethod
     def _video_metadata(message: Any) -> tuple[bool, int | None, int | None, float | None]:
@@ -114,26 +158,39 @@ class TelegramGateway:
 
     async def scan_messages(self, min_id: int) -> AsyncIterator[MessageSnapshot]:
         source = await self._source_entity()
-        async for message in self.client.iter_messages(
-            source,
-            min_id=min_id,
-            reverse=True,
-            wait_time=1,
-        ):
-            is_video, width, height, duration = self._video_metadata(message)
-            document = getattr(message, "document", None)
-            yield MessageSnapshot(
-                message_id=int(message.id),
-                grouped_id=int(message.grouped_id) if message.grouped_id is not None else None,
-                caption=str(message.raw_text or ""),
-                is_video=is_video,
-                is_photo=getattr(message, "photo", None) is not None,
-                width=width,
-                height=height,
-                duration=duration,
-                file_size=int(document.size) if is_video and document is not None else None,
-                published_at=message.date,
-            )
+        try:
+            async for message in self.client.iter_messages(
+                source,
+                min_id=min_id,
+                reverse=True,
+                wait_time=1,
+            ):
+                is_video, width, height, duration = self._video_metadata(message)
+                document = getattr(message, "document", None)
+                yield MessageSnapshot(
+                    message_id=int(message.id),
+                    grouped_id=(
+                        int(message.grouped_id)
+                        if message.grouped_id is not None
+                        else None
+                    ),
+                    caption=str(message.raw_text or ""),
+                    is_video=is_video,
+                    is_photo=getattr(message, "photo", None) is not None,
+                    width=width,
+                    height=height,
+                    duration=duration,
+                    file_size=(
+                        int(document.size)
+                        if is_video and document is not None
+                        else None
+                    ),
+                    published_at=message.date,
+                )
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"读取源频道失败：{type(exc).__name__}: {exc}"
+            ) from exc
 
     async def _retry(self, operation: Callable[[], Awaitable[T]], description: str) -> T:
         attempts = len(self.config.retry_delays_seconds) + 1
@@ -317,7 +374,12 @@ class TelegramGateway:
                 raise SourceMediaUnavailable(f"源消息 {message_id} 不再包含有效视频")
             return await self._download_message(message, message_id, destination)
 
-        return await self._retry(operation, f"下载消息 {message_id}")
+        try:
+            return await self._retry(operation, f"下载消息 {message_id}")
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"下载源频道媒体失败：{type(exc).__name__}: {exc}"
+            ) from exc
 
     async def send_album(
         self,
@@ -377,6 +439,10 @@ class TelegramGateway:
                     exc.seconds,
                 )
                 await asyncio.sleep(max(1, exc.seconds))
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"向目标频道发布失败：{type(exc).__name__}: {exc}"
+                ) from exc
             except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
                 last_error = exc
                 LOGGER.warning("发送目标媒体组第 %s 次尝试结果不确定：%s", index + 1, exc)
@@ -409,11 +475,16 @@ class TelegramGateway:
         if since.tzinfo is None:
             since = since.replace(tzinfo=UTC)
         albums: dict[int, list[Any]] = defaultdict(list)
-        async for message in self.client.iter_messages(target, limit=100):
-            if message.date < since:
-                break
-            if message.grouped_id is not None:
-                albums[int(message.grouped_id)].append(message)
+        try:
+            async for message in self.client.iter_messages(target, limit=100):
+                if message.date < since:
+                    break
+                if message.grouped_id is not None:
+                    albums[int(message.grouped_id)].append(message)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"核对目标频道失败：{type(exc).__name__}: {exc}"
+            ) from exc
         matches: list[DeliveryReceipt] = []
         for grouped_id, messages in albums.items():
             ordered = sorted(messages, key=lambda item: item.id)
@@ -432,30 +503,28 @@ class TelegramGateway:
                 )
         return matches[0] if len(matches) == 1 else None
 
-    async def notify(self, text: str) -> None:
-        if not self.config.notify_saved_messages:
-            return
-
-        async def operation() -> Any:
-            return await self.client.send_message("me", text)
-
-        await self._retry(operation, "发送运行摘要")
-
     async def doctor(self) -> dict[str, str]:
+        group = self._require_group()
         source = await self._source_entity()
         target = await self._target_entity()
-        permissions = await self.client.get_permissions(target, "me")
+        try:
+            permissions = await self.client.get_permissions(target, "me")
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"检查目标频道权限失败：{type(exc).__name__}: {exc}"
+            ) from exc
         can_post = bool(
             getattr(permissions, "is_creator", False)
             or getattr(permissions, "is_admin", False)
             or getattr(permissions, "post_messages", False)
         )
         if not can_post:
-            raise TelegramError("当前用户没有目标频道发帖权限")
+            raise ChannelGroupUnavailable("当前用户没有目标频道发帖权限")
         me = await self.client.get_me()
         return {
+            "group": group.name,
             "account": str(me.id),
-            "source": str(getattr(source, "title", self.config.source_channel)),
-            "target": str(getattr(target, "title", self.config.target_channel)),
+            "source": str(getattr(source, "title", group.source_channel)),
+            "target": str(getattr(target, "title", group.target_channel)),
             "post_permission": "ok",
         }

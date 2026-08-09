@@ -57,19 +57,33 @@ def _resolve_path(base: Path, raw: str) -> Path:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelGroupConfig:
+    name: str
+    source_channel: str | int
+    target_channel: str | int
+    database_path: Path
+    daily_success_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReportingConfig:
+    bot_token: str
+    chat_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     api_id: int
     api_hash: str
     phone: str | None
     session_path: Path
-    source_channel: str | int
-    target_channel: str | int
+    channel_groups: tuple[ChannelGroupConfig, ...]
+    reporting: ReportingConfig
     keep_tags: tuple[str, ...]
     drop_tags: tuple[str, ...]
     caption_limit: int
     timezone: ZoneInfo
     daily_time: str
-    daily_success_count: int
     ffmpeg_path: str
     ffprobe_path: str
     ffmpeg_threads: int
@@ -79,14 +93,12 @@ class AppConfig:
     minimum_source_short_edge: int
     album_settle_seconds: int
     disk_reserve_bytes: int
-    database_path: Path
     work_dir: Path
     max_candidates_per_run: int
     max_runtime_hours: float
     download_concurrency: int
     flood_sleep_threshold_seconds: int
     retry_delays_seconds: tuple[int, ...]
-    notify_saved_messages: bool
 
 
 def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -104,11 +116,11 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     with config_path.open("rb") as handle:
         data = tomllib.load(handle)
 
-    telegram = _section(data, "telegram")
     content = _section(data, "content")
     schedule = _section(data, "schedule")
     processing = _section(data, "processing")
     runtime = _section(data, "runtime")
+    reporting = _section(data, "reporting")
     base = config_path.parent
 
     api_id_raw = os.getenv("TG_API_ID", "")
@@ -136,25 +148,74 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     except Exception as exc:
         raise ConfigError("timezone 不是有效的 IANA 时区") from exc
 
+    raw_groups = data.get("channel_groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise ConfigError("必须配置至少一个 [[channel_groups]]；旧版单频道配置已不再支持")
+    channel_groups: list[ChannelGroupConfig] = []
+    names: set[str] = set()
+    database_paths: set[str] = set()
+    for index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            raise ConfigError(f"channel_groups 第 {index} 项必须是 TOML 表")
+        try:
+            name = str(raw_group["name"]).strip()
+            source_channel = _channel(raw_group["source_channel"])
+            target_channel = _channel(raw_group["target_channel"])
+            database_path = _resolve_path(base, str(raw_group["database_path"]))
+            daily_success_count = int(raw_group["daily_success_count"])
+        except KeyError as exc:
+            raise ConfigError(
+                f"channel_groups 第 {index} 项缺少 {exc.args[0]}"
+            ) from exc
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"channel_groups 第 {index} 项包含无效值") from exc
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", name):
+            raise ConfigError(
+                f"频道组名称 {name!r} 无效，只能使用字母、数字、下划线或连字符"
+            )
+        if name in names:
+            raise ConfigError(f"频道组名称不能重复：{name}")
+        path_key = os.path.normcase(str(database_path))
+        if path_key in database_paths:
+            raise ConfigError(f"频道组数据库路径不能重复：{database_path}")
+        if daily_success_count < 1:
+            raise ConfigError(f"频道组 {name} 的 daily_success_count 必须大于 0")
+        names.add(name)
+        database_paths.add(path_key)
+        channel_groups.append(
+            ChannelGroupConfig(
+                name=name,
+                source_channel=source_channel,
+                target_channel=target_channel,
+                database_path=database_path,
+                daily_success_count=daily_success_count,
+            )
+        )
+
+    report_bot_token = os.getenv("TG_REPORT_BOT_TOKEN", "").strip()
+    if not report_bot_token:
+        raise ConfigError(".env 中必须设置 TG_REPORT_BOT_TOKEN")
     try:
-        source_channel = _channel(telegram["source_channel"])
-        target_channel = _channel(telegram["target_channel"])
+        report_chat_id = int(reporting["chat_id"])
     except KeyError as exc:
-        raise ConfigError(f"缺少配置项 telegram.{exc.args[0]}") from exc
+        raise ConfigError("缺少配置项 reporting.chat_id") from exc
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("reporting.chat_id 必须是整数") from exc
+    if report_chat_id <= 0:
+        raise ConfigError("私人会话 reporting.chat_id 必须是正整数")
 
     config = AppConfig(
         api_id=api_id,
         api_hash=api_hash,
         phone=os.getenv("TG_PHONE") or None,
         session_path=_resolve_path(base, os.getenv("TG_SESSION_PATH", "./data/telegram-user")),
-        source_channel=source_channel,
-        target_channel=target_channel,
+        channel_groups=tuple(channel_groups),
+        reporting=ReportingConfig(report_bot_token, report_chat_id),
         keep_tags=keep_tags,
         drop_tags=drop_tags,
         caption_limit=int(content.get("caption_limit", 1024)),
         timezone=timezone,
         daily_time=daily_time,
-        daily_success_count=int(schedule.get("daily_success_count", 4)),
         ffmpeg_path=str(processing.get("ffmpeg_path", "ffmpeg")),
         ffprobe_path=str(processing.get("ffprobe_path", "ffprobe")),
         ffmpeg_threads=int(processing.get("ffmpeg_threads", 3)),
@@ -164,7 +225,6 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         minimum_source_short_edge=int(processing.get("minimum_source_short_edge", 1080)),
         album_settle_seconds=int(processing.get("album_settle_seconds", 300)),
         disk_reserve_bytes=int(processing.get("disk_reserve_bytes", 1_073_741_824)),
-        database_path=_resolve_path(base, str(runtime.get("database_path", "./data/operator.db"))),
         work_dir=_resolve_path(base, str(runtime.get("work_dir", "./work"))),
         max_candidates_per_run=int(runtime.get("max_candidates_per_run", 12)),
         max_runtime_hours=float(runtime.get("max_runtime_hours", 6)),
@@ -175,10 +235,17 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         retry_delays_seconds=tuple(
             int(value) for value in runtime.get("retry_delays_seconds", [30, 120, 600])
         ),
-        notify_saved_messages=bool(runtime.get("notify_saved_messages", True)),
     )
-    if config.daily_success_count < 1 or config.max_candidates_per_run < config.daily_success_count:
-        raise ConfigError("每日成功数必须大于 0，最大候选数不得小于每日成功数")
+    oversized_groups = [
+        group.name
+        for group in config.channel_groups
+        if group.daily_success_count > config.max_candidates_per_run
+    ]
+    if oversized_groups:
+        raise ConfigError(
+            "以下频道组的 daily_success_count 超过 max_candidates_per_run："
+            + ", ".join(oversized_groups)
+        )
     if not 1 <= config.ffmpeg_threads <= 4:
         raise ConfigError("4C VPS 的 ffmpeg_threads 必须在 1 到 4 之间")
     if not 0 <= config.crf <= 51:

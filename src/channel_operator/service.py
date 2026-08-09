@@ -5,15 +5,17 @@ import logging
 import shutil
 import time
 import uuid
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
 from .captions import build_caption
-from .config import AppConfig
+from .config import AppConfig, ChannelGroupConfig
 from .database import StateDatabase
 from .media import InvalidSourceMedia, MediaProcessor
 from .models import CaptionResult, MediaGroup, RunSummary
-from .telegram import SourceMediaUnavailable, TelegramGateway
+from .reporting import BotReporter
+from .telegram import ChannelGroupUnavailable, SourceMediaUnavailable, TelegramGateway
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,15 +24,19 @@ class AutomationService:
     def __init__(
         self,
         config: AppConfig,
+        group: ChannelGroupConfig,
         database: StateDatabase,
         telegram: TelegramGateway,
         media: MediaProcessor,
+        reporter: BotReporter,
     ):
         self.config = config
+        self.group = group
         self.database = database
         self.telegram = telegram
         self.media = media
-        self.source_key = str(config.source_channel)
+        self.reporter = reporter
+        self.source_key = str(group.source_channel)
 
     async def index(self) -> int:
         checkpoint = self.database.checkpoint(self.source_key)
@@ -48,7 +54,12 @@ class AutomationService:
         if batch or newest_id != checkpoint:
             self.database.save_messages(self.source_key, batch, newest_id)
         group_count = self.database.refresh_groups(self.source_key)
-        LOGGER.info("索引完成：新消息 %s 条，媒体组总数 %s", scanned, group_count)
+        LOGGER.info(
+            "频道组 %s 索引完成：新消息 %s 条，媒体组总数 %s",
+            self.group.name,
+            scanned,
+            group_count,
+        )
         return group_count
 
     async def dry_run(self) -> list[tuple[int, str]]:
@@ -71,13 +82,14 @@ class AutomationService:
                 LOGGER.info("预览跳过空文案媒体组 %s", candidate.grouped_id)
                 continue
             previews.append((candidate.grouped_id, caption.plain))
-            if len(previews) >= self.config.daily_success_count:
+            if len(previews) >= self.group.daily_success_count:
                 break
         return previews
 
     def _work_directory(self, group: MediaGroup) -> Path:
-        self.config.work_dir.mkdir(parents=True, exist_ok=True)
-        return self.config.work_dir / f"{group.grouped_id}-{uuid.uuid4().hex[:8]}"
+        group_root = self.config.work_dir / self.group.name
+        group_root.mkdir(parents=True, exist_ok=True)
+        return group_root / f"{group.grouped_id}-{uuid.uuid4().hex[:8]}"
 
     def _cleanup(self, directory: Path) -> None:
         work_root = self.config.work_dir.resolve()
@@ -86,6 +98,10 @@ class AutomationService:
             raise RuntimeError(f"拒绝清理工作目录以外的路径：{target}")
         if target.exists():
             shutil.rmtree(target)
+        group_root = (self.config.work_dir / self.group.name).resolve()
+        if group_root.parent == work_root and group_root.exists():
+            with suppress(OSError):
+                group_root.rmdir()
 
     async def _reconcile(self, group: MediaGroup, run_date: str) -> bool:
         if group.status != "uploading" or not group.upload_started_at:
@@ -100,8 +116,10 @@ class AutomationService:
                 "上次上传结果不确定，未自动重发，请人工核对目标频道",
                 permanent=True,
             )
-            await self.telegram.notify(
-                f"⚠️ 源媒体组 {group.grouped_id} 的上传结果不确定，已暂停该组，请人工核对。"
+            await self.reporter.send(
+                f"⚠️ 频道组 {self.group.name}\n"
+                f"源媒体组 {group.grouped_id} 的上传结果不确定，"
+                "已暂停该媒体组，请人工核对目标频道。"
             )
             return False
         self.database.mark_published(
@@ -167,7 +185,7 @@ class AutomationService:
         deadline = time.monotonic() + self.config.max_runtime_hours * 3600
 
         while (
-            summary.published < self.config.daily_success_count
+            summary.published < self.group.daily_success_count
             and summary.attempted < self.config.max_candidates_per_run
             and time.monotonic() < deadline
         ):
@@ -216,6 +234,11 @@ class AutomationService:
                     self.source_key, group.grouped_id, str(exc), permanent=True
                 )
                 summary.rejected += 1
+            except ChannelGroupUnavailable as exc:
+                self.database.mark_failure(
+                    self.source_key, group.grouped_id, str(exc), permanent=False
+                )
+                raise
             except Exception as exc:
                 LOGGER.exception("媒体组 %s 处理失败", group.grouped_id)
                 self.database.mark_failure(
@@ -224,17 +247,4 @@ class AutomationService:
                 summary.retryable_failures += 1
             else:
                 summary.published += 1
-
-        message = (
-            f"Telegram 自动运营任务 {summary.run_date}\n"
-            f"成功：{summary.published}/{self.config.daily_success_count}\n"
-            f"本次尝试：{summary.attempted}\n"
-            f"永久跳过：{summary.rejected}\n"
-            f"可重试失败：{summary.retryable_failures}\n"
-            f"恢复确认：{summary.reconciled}"
-        )
-        try:
-            await self.telegram.notify(message)
-        except Exception:
-            LOGGER.exception("发送运行摘要失败")
         return summary

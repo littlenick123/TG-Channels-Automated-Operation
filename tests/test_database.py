@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from channel_operator.database import StateDatabase
+import pytest
+
+from channel_operator.database import DatabaseIdentityError, StateDatabase
 from channel_operator.models import MessageSnapshot
 
 
@@ -85,3 +87,22 @@ def test_multiple_video_album_is_not_eligible(tmp_path):
 
     assert database.next_candidate("source", "2026-08-02", 1080, 0, set()) is None
     database.close()
+
+
+def test_database_identity_prevents_cross_channel_reuse(tmp_path):
+    path = tmp_path / "channel_b.db"
+    database = StateDatabase(
+        path,
+        group_name="channel_b",
+        source_channel=-1001,
+        target_channel=-1002,
+    )
+    database.close()
+
+    with pytest.raises(DatabaseIdentityError, match="属于其他频道组"):
+        StateDatabase(
+            path,
+            group_name="channel_c",
+            source_channel=-1001,
+            target_channel=-1003,
+        )
