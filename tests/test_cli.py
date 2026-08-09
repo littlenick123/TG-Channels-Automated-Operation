@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 import pytest
 
-from channel_operator.cli import _parser, _select_groups
+from channel_operator.cli import _configure_logging, _parser, _select_groups
 from channel_operator.config import ChannelGroupConfig, ConfigError
 
 
@@ -31,3 +32,16 @@ def test_schedule_command_is_available():
 
     assert arguments.command == "schedule"
     assert arguments.config == "config.toml"
+
+
+def test_default_logging_hides_short_telethon_flood_wait_info():
+    logger = logging.getLogger("telethon.client.users")
+    original_level = logger.level
+    try:
+        _configure_logging(verbose=False)
+        assert logger.level == logging.WARNING
+
+        _configure_logging(verbose=True)
+        assert logger.level == logging.NOTSET
+    finally:
+        logger.setLevel(original_level)

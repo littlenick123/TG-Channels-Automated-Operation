@@ -15,6 +15,21 @@ from .service import AutomationService
 from .telegram import TelegramError, TelegramGateway
 
 
+def _configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("telethon.client.users").setLevel(
+        logging.NOTSET if verbose else logging.WARNING
+    )
+    # The Bot API token is part of the request URL. HTTPX's INFO/DEBUG request
+    # logging would expose it, so all reporter failures are logged by our
+    # sanitized wrapper instead.
+    logging.getLogger("httpx").setLevel(logging.CRITICAL)
+    logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Telegram 频道自动运营")
     parser.add_argument("--config", default="config.toml", help="配置文件路径")
@@ -198,15 +213,7 @@ async def _run(arguments: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> None:
     arguments = _parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if arguments.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    # The Bot API token is part of the request URL. HTTPX's INFO/DEBUG request
-    # logging would expose it, so all reporter failures are logged by our
-    # sanitized wrapper instead.
-    logging.getLogger("httpx").setLevel(logging.CRITICAL)
-    logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+    _configure_logging(arguments.verbose)
     try:
         code = asyncio.run(_run(arguments))
     except (ConfigError, TelegramError, ReporterError, AlreadyRunningError) as exc:

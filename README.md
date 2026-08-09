@@ -1434,7 +1434,8 @@ download_concurrency = 4
 ### FloodWait
 
 - 短 FloodWait 会按配置自动等待。
-- 日志会显示 `FloodWaitError` 或 `FloodPremiumWaitError`。
+- Telethon 自动处理的短等待 INFO 明细默认不输出；使用 `--verbose` 时可以查看。
+- 超过自动等待阈值并进入项目重试逻辑时，日志仍会显示 WARNING、`FloodWaitError` 或 `FloodPremiumWaitError`。
 - 频繁出现时降低 `download_concurrency`。
 - 不要通过同时启动多个脚本绕过限制；全局锁会阻止并行任务。
 
