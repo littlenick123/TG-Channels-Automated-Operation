@@ -261,7 +261,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             runtime.get("flood_sleep_threshold_seconds", 60)
         ),
         retry_delays_seconds=tuple(
-            int(value) for value in runtime.get("retry_delays_seconds", [30, 120, 600])
+            int(value) for value in runtime.get("retry_delays_seconds", [30, 120, 360])
         ),
     )
     oversized_groups = [

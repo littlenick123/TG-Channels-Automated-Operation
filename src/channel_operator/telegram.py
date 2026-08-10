@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from .models import DeliveryReceipt, MessageSnapshot, VideoInfo
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
+UPLOAD_PART_FAILURE_RE = re.compile(r"^Failed to upload file part \d+\.$")
 FLOOD_WAIT_ERRORS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
 CHANNEL_GROUP_ERRORS = (
     errors.ChannelBannedError,
@@ -443,6 +445,20 @@ class TelegramGateway:
                 raise ChannelGroupUnavailable(
                     f"向目标频道发布失败：{type(exc).__name__}: {exc}"
                 ) from exc
+            except RuntimeError as exc:
+                if UPLOAD_PART_FAILURE_RE.fullmatch(str(exc)) is None:
+                    raise
+                last_error = exc
+                LOGGER.warning(
+                    "上传大文件分片失败，第 %s 次完整上传结果不确定：%s",
+                    index + 1,
+                    exc,
+                )
+                receipt = await self.find_matching_album(
+                    upload_started_at, caption_plain
+                )
+                if receipt is not None:
+                    return receipt
             except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
                 last_error = exc
                 LOGGER.warning("发送目标媒体组第 %s 次尝试结果不确定：%s", index + 1, exc)

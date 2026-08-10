@@ -13,7 +13,11 @@ from telethon.tl.types import (
 )
 
 from channel_operator.models import DeliveryReceipt, VideoInfo
-from channel_operator.telegram import ChannelGroupUnavailable, TelegramGateway
+from channel_operator.telegram import (
+    ChannelGroupUnavailable,
+    TelegramError,
+    TelegramGateway,
+)
 
 
 class FakeClient:
@@ -43,6 +47,22 @@ class FlakyClient(FakeClient):
     async def send_file(self, entity, files, **kwargs):
         self.calls.append((entity, files, kwargs))
         raise OSError("response was lost")
+
+
+class UploadRuntimeErrorClient(FakeClient):
+    def __init__(self, message: str, failures: int):
+        super().__init__()
+        self.message = message
+        self.failures = failures
+        self.upload_attempts = []
+
+    async def upload_file(self, file):
+        path = Path(file)
+        self.upload_attempts.append((path, path.exists()))
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError(self.message)
+        return await super().upload_file(file)
 
 
 class PrivateChannelClient(FakeClient):
@@ -101,6 +121,16 @@ class ReconcilingGateway(TelegramGateway):
     async def find_matching_album(self, started_at, caption_plain):
         assert caption_plain == "简介"
         return DeliveryReceipt((20, 21, 22, 23), 888)
+
+
+class NoReceiptGateway(TelegramGateway):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reconciliation_checks = 0
+
+    async def find_matching_album(self, started_at, caption_plain):
+        self.reconciliation_checks += 1
+        return None
 
 
 class ResumableGateway(TelegramGateway):
@@ -184,6 +214,91 @@ async def test_ambiguous_send_checks_target_before_retrying(app_config, tmp_path
 
     assert len(client.calls) == 1
     assert receipt == DeliveryReceipt((20, 21, 22, 23), 888)
+
+
+def _album_files(tmp_path: Path) -> tuple[list[Path], Path, VideoInfo]:
+    files = [
+        tmp_path / "video.mp4",
+        tmp_path / "frame_1.jpg",
+        tmp_path / "frame_2.jpg",
+        tmp_path / "frame_3.jpg",
+    ]
+    thumbnail = tmp_path / "video_thumb.jpg"
+    for path in [*files, thumbnail]:
+        path.write_bytes(b"test")
+    return files, thumbnail, VideoInfo(files[0], 180, 1280, 720, has_audio=True)
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_part_retries_the_existing_transcoded_file(
+    app_config, tmp_path: Path
+):
+    client = UploadRuntimeErrorClient("Failed to upload file part 235.", failures=3)
+    config = app_config(retry_delays_seconds=(0, 0, 0))
+    gateway = NoReceiptGateway(config, config.channel_groups[0], client=client)
+    files, thumbnail, video_info = _album_files(tmp_path)
+
+    receipt = await gateway.send_album(
+        files,
+        "<blockquote>简介</blockquote>",
+        "简介",
+        "2026-08-10T00:00:00+00:00",
+        video_info=video_info,
+        thumbnail=thumbnail,
+    )
+
+    assert receipt == DeliveryReceipt((10, 11, 12, 13), 777)
+    assert [path for path, _ in client.upload_attempts[:4]] == [files[0]] * 4
+    assert all(existed for _, existed in client.upload_attempts)
+    assert gateway.reconciliation_checks == 3
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_part_is_retryable_only_until_attempts_are_exhausted(
+    app_config, tmp_path: Path
+):
+    client = UploadRuntimeErrorClient("Failed to upload file part 7.", failures=4)
+    config = app_config(retry_delays_seconds=(0, 0, 0))
+    gateway = NoReceiptGateway(config, config.channel_groups[0], client=client)
+    files, thumbnail, video_info = _album_files(tmp_path)
+
+    with pytest.raises(TelegramError, match="发送目标媒体组重试耗尽"):
+        await gateway.send_album(
+            files,
+            "<blockquote>简介</blockquote>",
+            "简介",
+            "2026-08-10T00:00:00+00:00",
+            video_info=video_info,
+            thumbnail=thumbnail,
+        )
+
+    assert len(client.upload_attempts) == 4
+    assert gateway.reconciliation_checks == 5
+    assert all(path.exists() for path in [*files, thumbnail])
+
+
+@pytest.mark.asyncio
+async def test_unrelated_runtime_error_is_not_treated_as_upload_failure(
+    app_config, tmp_path: Path
+):
+    client = UploadRuntimeErrorClient("unexpected local bug", failures=1)
+    config = app_config(retry_delays_seconds=(0, 0, 0))
+    gateway = NoReceiptGateway(config, config.channel_groups[0], client=client)
+    files, thumbnail, video_info = _album_files(tmp_path)
+
+    with pytest.raises(RuntimeError, match="unexpected local bug"):
+        await gateway.send_album(
+            files,
+            "<blockquote>简介</blockquote>",
+            "简介",
+            "2026-08-10T00:00:00+00:00",
+            video_info=video_info,
+            thumbnail=thumbnail,
+        )
+
+    assert len(client.upload_attempts) == 1
+    assert gateway.reconciliation_checks == 0
 
 
 @pytest.mark.asyncio

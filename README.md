@@ -403,7 +403,7 @@ max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
 flood_sleep_threshold_seconds = 60
-retry_delays_seconds = [30, 120, 600]
+retry_delays_seconds = [30, 120, 360]
 ```
 
 #### `database_dir`
@@ -451,7 +451,9 @@ retry_delays_seconds = [30, 120, 600]
 #### `retry_delays_seconds`
 
 - 网络类错误的重试间隔列表，单位为秒。
-- `[30, 120, 600]` 表示首次失败后等 30 秒、第二次等 2 分钟、第三次等 10 分钟。
+- `[30, 120, 360]` 表示首次失败后等 30 秒、第二次等 2 分钟、第三次等 6 分钟。
+- Telethon 抛出的 `Failed to upload file part <编号>.` 会被精确识别为临时大文件分片上传错误，并按这组间隔重新上传现有转码成品；其他 `RuntimeError` 不会被误判为网络错误。
+- 上传重试发生在单个媒体组的工作目录清理之前，因此不会重新下载或重新转码；Telethon 不支持从失败分片续传，每次完整上传重试仍会从视频开头开始。
 - 同一次上传重试使用已经保存的同一份随机文案。
 
 ### `[[channel_groups]]` 独立频道组
@@ -542,7 +544,7 @@ max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
 flood_sleep_threshold_seconds = 60
-retry_delays_seconds = [30, 120, 600]
+retry_delays_seconds = [30, 120, 360]
 
 [[channel_groups]]
 name = "channel_b"

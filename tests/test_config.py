@@ -47,6 +47,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.download_concurrency == 4
     assert config.flood_sleep_threshold_seconds == 60
+    assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
 
 

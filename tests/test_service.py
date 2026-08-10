@@ -7,7 +7,7 @@ import pytest
 from channel_operator.database import StateDatabase
 from channel_operator.models import DeliveryReceipt, MessageSnapshot, VideoInfo
 from channel_operator.service import AutomationService
-from channel_operator.telegram import ChannelGroupUnavailable
+from channel_operator.telegram import ChannelGroupUnavailable, TelegramError
 
 
 class FakeTelegram:
@@ -63,6 +63,25 @@ class FakeReporter:
 class UnavailableDownloadTelegram(FakeTelegram):
     async def download_video(self, message_id, destination):
         raise ChannelGroupUnavailable("源频道已被封禁")
+
+
+class ExhaustedUploadTelegram(FakeTelegram):
+    def __init__(self, snapshots):
+        super().__init__(snapshots)
+        self.upload_files_existed = False
+
+    async def send_album(
+        self,
+        files,
+        caption_html,
+        caption_plain,
+        upload_started_at,
+        *,
+        video_info,
+        thumbnail,
+    ):
+        self.upload_files_existed = all(path.exists() for path in [*files, thumbnail])
+        raise TelegramError("发送目标媒体组重试耗尽")
 
 
 class FakeMedia:
@@ -256,5 +275,36 @@ async def test_channel_failure_aborts_group_and_keeps_media_retryable(app_config
     with pytest.raises(ChannelGroupUnavailable):
         await service.run_once()
 
+    assert database.counts(str(group.source_channel))["retryable"] == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_upload_cleans_media_then_keeps_group_retryable(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=1,
+        grouped_id=444,
+        caption="标签：#有效\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    database = StateDatabase(group.database_path)
+    telegram = ExhaustedUploadTelegram(source)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    summary = await service.run_once()
+
+    assert summary.retryable_failures == 1
+    assert telegram.upload_files_existed is True
+    assert list(config.work_dir.iterdir()) == []
     assert database.counts(str(group.source_channel))["retryable"] == 1
     database.close()
