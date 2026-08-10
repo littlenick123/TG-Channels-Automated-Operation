@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from telethon.extensions import html as telethon_html
-from telethon.tl.types import MessageEntityBlockquote
+from telethon.tl.types import MessageEntityBlockquote, MessageEntityBold
 
 from channel_operator.captions import build_caption
 
@@ -31,6 +31,22 @@ def test_caption_prioritizes_present_keep_tags_and_drops_forbidden():
     assert result.plain.endswith("这是简介")
     assert result.html.endswith("<blockquote expandable>这是简介</blockquote>")
     assert "演员" not in result.plain
+
+
+def test_tag_line_is_bold_and_has_no_blank_line_before_intro():
+    result = build_caption("标签：#甲 #乙\n简介：简介内容", [], [], random_source=FirstRandom())
+
+    assert result.plain == "#甲 #乙\n简介内容"
+    assert result.html == (
+        "<b>#甲 #乙</b>\n"
+        "<blockquote expandable>简介内容</blockquote>"
+    )
+    parsed_text, entities = telethon_html.parse(result.html)
+    assert parsed_text == result.plain
+    assert len(entities) == 2
+    assert isinstance(entities[0], MessageEntityBold)
+    assert isinstance(entities[1], MessageEntityBlockquote)
+    assert entities[1].collapsed is True
 
 
 def test_each_new_attempt_may_choose_a_different_random_set():

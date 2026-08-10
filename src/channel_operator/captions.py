@@ -113,17 +113,17 @@ def build_caption(
     tag_line = " ".join(chosen)
     intro = _intro(source)
     if intro is not None:
-        separator = "\n\n" if tag_line else ""
+        separator = "\n" if tag_line else ""
         available = limit - _utf16_length(tag_line) - _utf16_length(separator)
         intro = _truncate_utf16_with_ellipsis(intro, available)
         if not intro:
             intro = None
 
     plain_parts = [part for part in (tag_line, intro) if part]
-    plain = "\n\n".join(plain_parts)
+    plain = "\n".join(plain_parts)
     html_parts: list[str] = []
     if tag_line:
-        html_parts.append(html.escape(tag_line))
+        html_parts.append(f"<b>{html.escape(tag_line)}</b>")
     if intro:
         html_parts.append(f"<blockquote expandable>{html.escape(intro)}</blockquote>")
-    return CaptionResult(html="\n\n".join(html_parts), plain=plain, tags=chosen, intro=intro)
+    return CaptionResult(html="\n".join(html_parts), plain=plain, tags=chosen, intro=intro)
