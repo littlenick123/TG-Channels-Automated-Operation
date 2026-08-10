@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from telethon.extensions import html as telethon_html
+from telethon.tl.types import MessageEntityBlockquote
+
 from channel_operator.captions import build_caption
 
 
@@ -26,7 +29,7 @@ def test_caption_prioritizes_present_keep_tags_and_drops_forbidden():
     assert result.tags == ("#必留", "#甲", "#乙", "#丙", "#丁")
     assert "#删除" not in result.plain
     assert result.plain.endswith("这是简介")
-    assert result.html.endswith("<blockquote>这是简介</blockquote>")
+    assert result.html.endswith("<blockquote expandable>这是简介</blockquote>")
     assert "演员" not in result.plain
 
 
@@ -66,7 +69,7 @@ def test_html_is_escaped_and_truncated_intro_ends_with_ellipsis():
     )
 
     assert result.plain == "<b>..."
-    assert result.html == "<blockquote>&lt;b&gt;...</blockquote>"
+    assert result.html == "<blockquote expandable>&lt;b&gt;...</blockquote>"
 
 
 def test_long_caption_stays_within_limit_and_marks_omitted_content():
@@ -81,6 +84,17 @@ def test_long_caption_stays_within_limit_and_marks_omitted_content():
     assert result.plain.endswith("...")
     assert len(result.plain.encode("utf-16-le")) // 2 <= 1024
     assert result.html.endswith("...</blockquote>")
+
+
+def test_intro_uses_collapsed_telegram_blockquote_entity():
+    result = build_caption("简介：这是一段可折叠简介", [], [])
+
+    parsed_text, entities = telethon_html.parse(result.html)
+
+    assert parsed_text == "这是一段可折叠简介"
+    assert len(entities) == 1
+    assert isinstance(entities[0], MessageEntityBlockquote)
+    assert entities[0].collapsed is True
 
 
 def test_only_first_hashtag_leading_line_is_used():

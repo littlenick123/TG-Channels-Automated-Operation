@@ -125,5 +125,5 @@ def build_caption(
     if tag_line:
         html_parts.append(html.escape(tag_line))
     if intro:
-        html_parts.append(f"<blockquote>{html.escape(intro)}</blockquote>")
+        html_parts.append(f"<blockquote expandable>{html.escape(intro)}</blockquote>")
     return CaptionResult(html="\n\n".join(html_parts), plain=plain, tags=chosen, intro=intro)
