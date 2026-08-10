@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -24,6 +27,8 @@ from .models import DeliveryReceipt, MessageSnapshot, VideoInfo
 LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 DOWNLOAD_REQUEST_SIZE = 512 * 1024
+DOWNLOAD_PROGRESS_INTERVAL_SECONDS = 30
+DOWNLOAD_STREAM_CLOSE_TIMEOUT_SECONDS = 10
 UPLOAD_PART_FAILURE_RE = re.compile(r"^Failed to upload file part \d+\.$")
 FLOOD_WAIT_ERRORS = (errors.FloodWaitError, errors.FloodPremiumWaitError)
 CHANNEL_GROUP_ERRORS = (
@@ -40,6 +45,10 @@ CHANNEL_GROUP_ERRORS = (
 
 class TelegramError(RuntimeError):
     """Raised when Telegram access or delivery fails."""
+
+
+class DownloadStalledError(OSError):
+    """Raised when a Telegram download batch makes no progress in time."""
 
 
 class SourceMediaUnavailable(TelegramError):
@@ -234,6 +243,67 @@ class TelegramGateway:
         except StopAsyncIteration as exc:
             raise OSError("Telegram 下载流在到达预期文件末尾前结束") from exc
 
+    @staticmethod
+    def _consume_future_result(future: asyncio.Future[Any]) -> None:
+        with suppress(BaseException):
+            future.exception()
+
+    async def _settle_cancelled_tasks(
+        self, tasks: list[asyncio.Task[Any]], timeout: float
+    ) -> int:
+        if not tasks:
+            return 0
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for task in done:
+            self._consume_future_result(task)
+        for task in pending:
+            task.cancel()
+            task.add_done_callback(self._consume_future_result)
+        return len(pending)
+
+    async def _close_download_streams(
+        self, streams: list[Any], message_id: int
+    ) -> None:
+        close_tasks: list[asyncio.Task[Any]] = []
+        for stream in streams:
+            close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+            if close is None:
+                continue
+            try:
+                result = close()
+            except Exception as exc:
+                LOGGER.debug("关闭下载消息 %s 的 Telegram 下载流失败：%s", message_id, exc)
+                continue
+            if inspect.isawaitable(result):
+                close_tasks.append(asyncio.create_task(result))
+        if not close_tasks:
+            return
+
+        close_timeout = min(
+            DOWNLOAD_STREAM_CLOSE_TIMEOUT_SECONDS,
+            self.config.download_stall_timeout_seconds,
+        )
+        done, pending = await asyncio.wait(close_tasks, timeout=close_timeout)
+        for task in done:
+            try:
+                error = task.exception()
+            except asyncio.CancelledError:
+                continue
+            if error is not None:
+                LOGGER.debug(
+                    "关闭下载消息 %s 的 Telegram 下载流失败：%s", message_id, error
+                )
+        if pending:
+            for task in pending:
+                task.cancel()
+                task.add_done_callback(self._consume_future_result)
+            LOGGER.warning(
+                "关闭下载消息 %s 的 %s 条 Telegram 下载流超过 %.1f 秒，已放弃等待",
+                message_id,
+                len(pending),
+                close_timeout,
+            )
+
     async def _download_message(
         self, message: Any, message_id: int, destination: Path
     ) -> Path:
@@ -283,6 +353,9 @@ class TelegramGateway:
             concurrency = min(self.config.download_concurrency, remaining_chunks)
             stride = concurrency * DOWNLOAD_REQUEST_SIZE
             streams: list[Any] = []
+            attempt_started_at = time.monotonic()
+            attempt_start_offset = offset
+            last_progress_log_at = attempt_started_at
             if concurrency:
                 LOGGER.info(
                     "下载消息 %s 使用 %s 路并发，分片大小 %s 字节",
@@ -315,13 +388,41 @@ class TelegramGateway:
                         asyncio.create_task(self._next_download_chunk(stream))
                         for stream in active_streams
                     ]
+                    batch = asyncio.gather(*tasks)
                     try:
-                        chunks = await asyncio.gather(*tasks)
-                    except BaseException:
+                        done, _ = await asyncio.wait(
+                            {batch},
+                            timeout=self.config.download_stall_timeout_seconds,
+                        )
+                        if not done:
+                            batch.cancel()
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            batch.add_done_callback(self._consume_future_result)
+                            raise DownloadStalledError(
+                                f"下载消息 {message_id} 连续 "
+                                f"{self.config.download_stall_timeout_seconds:g} 秒无进展，"
+                                f"已保存断点 {offset}/{expected_size} 字节"
+                            )
+                        chunks = batch.result()
+                    except BaseException as exc:
                         for task in tasks:
                             if not task.done():
                                 task.cancel()
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        pending = await self._settle_cancelled_tasks(
+                            tasks,
+                            min(
+                                DOWNLOAD_STREAM_CLOSE_TIMEOUT_SECONDS,
+                                self.config.download_stall_timeout_seconds,
+                            ),
+                        )
+                        if isinstance(exc, DownloadStalledError) and pending:
+                            LOGGER.warning(
+                                "下载消息 %s 有 %s 条分片任务取消后仍未退出",
+                                message_id,
+                                pending,
+                            )
                         raise
 
                     for chunk in chunks:
@@ -341,21 +442,25 @@ class TelegramGateway:
                                 f"预期 {len(chunk)} 字节，实际 {written} 字节"
                             )
                         offset += written
+                    now = time.monotonic()
+                    if (
+                        now - last_progress_log_at >= DOWNLOAD_PROGRESS_INTERVAL_SECONDS
+                        or offset >= expected_size
+                    ):
+                        elapsed = max(now - attempt_started_at, 0.001)
+                        speed = (offset - attempt_start_offset) / elapsed
+                        LOGGER.info(
+                            "下载消息 %s 进度 %.1f%%（%s/%s 字节），"
+                            "本次平均速度 %.2f MiB/s",
+                            message_id,
+                            offset * 100 / expected_size,
+                            offset,
+                            expected_size,
+                            speed / (1024 * 1024),
+                        )
+                        last_progress_log_at = now
             finally:
-                close_tasks = []
-                for stream in streams:
-                    close = getattr(stream, "close", None) or getattr(
-                        stream, "aclose", None
-                    )
-                    if close is not None:
-                        close_tasks.append(close())
-                if close_tasks:
-                    close_results = await asyncio.gather(
-                        *close_tasks, return_exceptions=True
-                    )
-                    for result in close_results:
-                        if isinstance(result, BaseException):
-                            LOGGER.debug("关闭 Telegram 下载流失败：%s", result)
+                await self._close_download_streams(streams, message_id)
             handle.flush()
             os.fsync(handle.fileno())
 

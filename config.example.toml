@@ -31,6 +31,7 @@ work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 8
+download_stall_timeout_seconds = 120
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 360]
 

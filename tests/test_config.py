@@ -46,6 +46,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.channel_groups[0].daily_success_count == 4
     assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.download_concurrency == 4
+    assert config.download_stall_timeout_seconds == 120
     assert config.flood_sleep_threshold_seconds == 60
     assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
@@ -147,6 +148,26 @@ def test_download_concurrency_must_be_between_one_and_eight(
     monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
 
     with pytest.raises(ConfigError, match="download_concurrency"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0, 3601])
+def test_download_stall_timeout_must_be_between_one_and_3600_seconds(
+    value: int, tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'work_dir = "./work"',
+            f'work_dir = "./work"\ndownload_stall_timeout_seconds = {value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="download_stall_timeout_seconds"):
         load_config(path)
 
 

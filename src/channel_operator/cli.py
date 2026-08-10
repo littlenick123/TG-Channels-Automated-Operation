@@ -121,6 +121,10 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"FFprobe: {ffprobe}")
             print(f"work_dir: {config.work_dir}")
             print(f"download_concurrency: {config.download_concurrency}")
+            print(
+                "download_stall_timeout_seconds: "
+                f"{config.download_stall_timeout_seconds:g}"
+            )
             bot_username = await reporter.doctor()
             print(f"report_bot: @{bot_username}")
             failed = False

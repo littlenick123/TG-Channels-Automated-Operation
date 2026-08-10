@@ -402,6 +402,7 @@ work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
+download_stall_timeout_seconds = 120
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 360]
 ```
@@ -441,6 +442,14 @@ retry_delays_seconds = [30, 120, 360]
 - 这不是同时处理多个媒体组；只是对当前视频同时发出多个分片请求。
 - 高延迟线路通常能从 4 路或 8 路获得明显提升。
 - 如果 FloodWait、超时或断点重试明显增加，应降低为 4 或 2。
+
+#### `download_stall_timeout_seconds`
+
+- 单批并发下载分片允许连续无进展的最长时间，单位为秒，范围 `1–3600`，默认和推荐值为 `120`。
+- 只要同一批中的任意一路超过该时间仍未返回，程序就会取消本批全部下载流，避免其他并发流永久等待。
+- 已经完整写入 `.part` 的分片会保留；下载器限时关闭旧连接后，按 `retry_delays_seconds` 从对齐断点继续，不会重新下载已保存部分。
+- Telegram 下载流关闭超过 10 秒时程序会放弃等待，防止频道组整体超时又卡在清理阶段。
+- 下载期间约每 30 秒记录一次完成百分比、字节数和本次平均速度；下载很快时至少会记录一次 100% 完成日志。
 
 #### `flood_sleep_threshold_seconds`
 
@@ -543,6 +552,7 @@ work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
 download_concurrency = 4
+download_stall_timeout_seconds = 120
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 360]
 
@@ -1440,9 +1450,10 @@ watch -n 5 'find work -type f -name "*.part" -exec ls -lh {} \;'
 ```toml
 [runtime]
 download_concurrency = 4
+download_stall_timeout_seconds = 120
 ```
 
-如果 4 路稳定且没有明显 FloodWait，可以测试 8；如果速度没有明显提升或错误增多，恢复为 4 或 2。
+如果 4 路稳定且没有明显 FloodWait，可以测试 8；如果速度没有明显提升或错误增多，恢复为 4 或 2。单路下载流僵死超过 120 秒时，程序会自动关闭当前批次并按重试间隔从 `.part` 断点继续。
 
 ### FloodWait
 

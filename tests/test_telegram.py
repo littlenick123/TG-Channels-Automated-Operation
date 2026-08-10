@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,44 @@ class ResumableDownloadClient(FakeClient):
             for index in range(limit):
                 if call_number == 1 and index >= 1:
                     raise OSError("simulated interrupted download")
+                if position >= len(self.data):
+                    return
+                end = min(position + chunk_size, len(self.data))
+                yield self.data[position:end]
+                position += stride
+
+        return stream()
+
+
+class StallingDownloadClient(ResumableDownloadClient):
+    def iter_download(
+        self,
+        message,
+        *,
+        offset,
+        stride,
+        limit,
+        request_size,
+        chunk_size,
+        file_size,
+    ):
+        call_number = len(self.download_calls) + 1
+        self.download_calls.append(
+            {
+                "offset": offset,
+                "stride": stride,
+                "limit": limit,
+                "request_size": request_size,
+                "chunk_size": chunk_size,
+                "file_size": file_size,
+            }
+        )
+
+        async def stream():
+            position = offset
+            for index in range(limit):
+                if call_number == 2 and index >= 1:
+                    await asyncio.Future()
                 if position >= len(self.data):
                     return
                 end = min(position + chunk_size, len(self.data))
@@ -340,6 +379,44 @@ async def test_download_resumes_partial_file_after_network_error(app_config, tmp
     assert all(call["stride"] == request_size * 2 for call in client.download_calls)
     assert all(call["file_size"] == len(data) for call in client.download_calls)
     assert client.flood_sleep_threshold == 60
+
+
+@pytest.mark.asyncio
+async def test_stalled_download_lane_is_cancelled_and_resumes_from_partial_file(
+    app_config, tmp_path: Path, caplog
+):
+    request_size = 512 * 1024
+    data = (
+        b"a" * request_size
+        + b"b" * request_size
+        + b"c" * request_size
+        + b"d" * request_size
+        + b"tail"
+    )
+    client = StallingDownloadClient(data)
+    config = app_config(
+        retry_delays_seconds=(0,),
+        download_concurrency=2,
+        download_stall_timeout_seconds=0.02,
+    )
+    gateway = ResumableGateway(config, config.channel_groups[0], client=client)
+    destination = tmp_path / "source_video.mp4"
+    caplog.set_level("INFO")
+
+    result = await gateway.download_video(3116, destination)
+
+    assert result == destination
+    assert destination.read_bytes() == data
+    assert not destination.with_name("source_video.mp4.part").exists()
+    assert [call["offset"] for call in client.download_calls] == [
+        0,
+        request_size,
+        request_size * 2,
+        request_size * 3,
+    ]
+    assert "连续 0.02 秒无进展" in caplog.text
+    assert f"从 {request_size * 2}/{len(data)} 字节继续" in caplog.text
+    assert "进度 100.0%" in caplog.text
 
 
 @pytest.mark.asyncio

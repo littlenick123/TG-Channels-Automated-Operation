@@ -99,6 +99,7 @@ class AppConfig:
     max_candidates_per_run: int
     max_runtime_hours: float
     download_concurrency: int
+    download_stall_timeout_seconds: float
     flood_sleep_threshold_seconds: int
     retry_delays_seconds: tuple[int, ...]
 
@@ -257,6 +258,9 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         max_candidates_per_run=int(runtime.get("max_candidates_per_run", 12)),
         max_runtime_hours=float(runtime.get("max_runtime_hours", 6)),
         download_concurrency=int(runtime.get("download_concurrency", 4)),
+        download_stall_timeout_seconds=float(
+            runtime.get("download_stall_timeout_seconds", 120)
+        ),
         flood_sleep_threshold_seconds=int(
             runtime.get("flood_sleep_threshold_seconds", 60)
         ),
@@ -282,6 +286,8 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("caption_limit 必须在 1 到 1024 之间")
     if not 1 <= config.download_concurrency <= 8:
         raise ConfigError("download_concurrency 必须在 1 到 8 之间")
+    if not 1 <= config.download_stall_timeout_seconds <= 3_600:
+        raise ConfigError("download_stall_timeout_seconds 必须在 1 到 3600 秒之间")
     if not 1 <= config.flood_sleep_threshold_seconds <= 86_400:
         raise ConfigError("flood_sleep_threshold_seconds 必须在 1 到 86400 秒之间")
     return config

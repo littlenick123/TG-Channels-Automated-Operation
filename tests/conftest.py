@@ -49,6 +49,7 @@ def app_config(tmp_path: Path):
         max_candidates_per_run=12,
         max_runtime_hours=1,
         download_concurrency=4,
+        download_stall_timeout_seconds=120,
         flood_sleep_threshold_seconds=60,
         retry_delays_seconds=(0,),
     )
