@@ -32,6 +32,7 @@ def app_config(tmp_path: Path):
         keep_tags=("#必留",),
         drop_tags=("#删除",),
         caption_limit=1024,
+        intro_footer="",
         timezone=ZoneInfo("Asia/Shanghai"),
         daily_time="00:01",
         ffmpeg_path="ffmpeg",

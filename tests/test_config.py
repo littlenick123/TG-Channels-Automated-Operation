@@ -47,6 +47,40 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.download_concurrency == 4
     assert config.flood_sleep_threshold_seconds == 60
+    assert config.intro_footer == ""
+
+
+def test_intro_footer_is_loaded_and_trimmed(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'drop_tags = ["#删除"]',
+            'drop_tags = ["#删除"]\nintro_footer = "  固定追加内容  "',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    assert load_config(path).intro_footer == "固定追加内容"
+
+
+def test_intro_footer_must_be_one_line(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'drop_tags = ["#删除"]',
+            'drop_tags = ["#删除"]\nintro_footer = "第一行\\n第二行"',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="intro_footer 必须是单行文本"):
+        load_config(path)
 
 
 def test_keep_tags_accepts_large_priority_library(tmp_path: Path, monkeypatch):

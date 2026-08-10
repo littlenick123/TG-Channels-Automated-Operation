@@ -79,6 +79,7 @@ def build_caption(
     keep_tags: Sequence[str],
     drop_tags: Sequence[str],
     *,
+    intro_footer: str = "",
     limit: int = 1024,
     random_source: secrets.SystemRandom | None = None,
 ) -> CaptionResult:
@@ -111,19 +112,44 @@ def build_caption(
     chosen = tuple(fitted)
 
     tag_line = " ".join(chosen)
-    intro = _intro(source)
-    if intro is not None:
-        separator = "\n" if tag_line else ""
-        available = limit - _utf16_length(tag_line) - _utf16_length(separator)
-        intro = _truncate_utf16_with_ellipsis(intro, available)
-        if not intro:
-            intro = None
+    source_intro = _intro(source)
+    footer = intro_footer.strip()
+    separator = "\n" if tag_line and (source_intro or footer) else ""
+    available = limit - _utf16_length(tag_line) - _utf16_length(separator)
 
-    plain_parts = [part for part in (tag_line, intro) if part]
+    intro: str | None = None
+    fitted_footer: str | None = None
+    if available > 0 and footer:
+        if source_intro and available > _utf16_length(footer) + 1:
+            intro = _truncate_utf16_with_ellipsis(
+                source_intro, available - _utf16_length(footer) - 1
+            )
+            if intro:
+                fitted_footer = footer
+        if fitted_footer is None:
+            fitted_footer = _truncate_utf16_with_ellipsis(footer, available) or None
+    elif available > 0 and source_intro:
+        intro = _truncate_utf16_with_ellipsis(source_intro, available) or None
+
+    block_plain = "\n".join(part for part in (intro, fitted_footer) if part)
+    plain_parts = [part for part in (tag_line, block_plain) if part]
     plain = "\n".join(plain_parts)
     html_parts: list[str] = []
     if tag_line:
         html_parts.append(f"<b>{html.escape(tag_line)}</b>")
-    if intro:
-        html_parts.append(f"<blockquote expandable>{html.escape(intro)}</blockquote>")
-    return CaptionResult(html="\n".join(html_parts), plain=plain, tags=chosen, intro=intro)
+    if block_plain:
+        block_html_parts = []
+        if intro:
+            block_html_parts.append(html.escape(intro))
+        if fitted_footer:
+            block_html_parts.append(f"<b>{html.escape(fitted_footer)}</b>")
+        block_html = "\n".join(block_html_parts)
+        html_parts.append(
+            f"<blockquote expandable>{block_html}</blockquote>"
+        )
+    return CaptionResult(
+        html="\n".join(html_parts),
+        plain=plain,
+        tags=chosen,
+        intro=block_plain or None,
+    )

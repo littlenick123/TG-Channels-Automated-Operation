@@ -2,6 +2,7 @@
 keep_tags = ["#必留标签"]
 drop_tags = ["#删除标签1", "#删除标签2"]
 caption_limit = 1024
+intro_footer = ""
 
 [schedule]
 timezone = "Asia/Shanghai"

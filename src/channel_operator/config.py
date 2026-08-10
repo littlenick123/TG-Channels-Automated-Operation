@@ -82,6 +82,7 @@ class AppConfig:
     keep_tags: tuple[str, ...]
     drop_tags: tuple[str, ...]
     caption_limit: int
+    intro_footer: str
     timezone: ZoneInfo
     daily_time: str
     ffmpeg_path: str
@@ -141,6 +142,12 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     overlap = keep_keys & drop_keys
     if overlap:
         raise ConfigError(f"keep_tags 与 drop_tags 不能重叠：{', '.join(sorted(overlap))}")
+    intro_footer_raw = content.get("intro_footer", "")
+    if not isinstance(intro_footer_raw, str):
+        raise ConfigError("content.intro_footer 必须是字符串")
+    intro_footer = intro_footer_raw.strip()
+    if "\n" in intro_footer or "\r" in intro_footer:
+        raise ConfigError("content.intro_footer 必须是单行文本")
 
     daily_time = str(schedule.get("daily_time", "00:01"))
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
@@ -233,6 +240,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         keep_tags=keep_tags,
         drop_tags=drop_tags,
         caption_limit=int(content.get("caption_limit", 1024)),
+        intro_footer=intro_footer,
         timezone=timezone,
         daily_time=daily_time,
         ffmpeg_path=str(processing.get("ffmpeg_path", "ffmpeg")),

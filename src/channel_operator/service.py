@@ -76,6 +76,7 @@ class AutomationService:
                 candidate.caption,
                 self.config.keep_tags,
                 self.config.drop_tags,
+                intro_footer=self.config.intro_footer,
                 limit=self.config.caption_limit,
             )
             if not caption.plain.strip():
@@ -213,6 +214,7 @@ class AutomationService:
                 group.caption,
                 self.config.keep_tags,
                 self.config.drop_tags,
+                intro_footer=self.config.intro_footer,
                 limit=self.config.caption_limit,
             )
             if not caption.plain.strip():

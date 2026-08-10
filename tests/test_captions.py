@@ -49,6 +49,56 @@ def test_tag_line_is_bold_and_has_no_blank_line_before_intro():
     assert entities[1].collapsed is True
 
 
+def test_intro_footer_is_bold_inside_the_same_collapsed_quote():
+    result = build_caption(
+        "标签：#甲\n简介：原始简介",
+        [],
+        [],
+        intro_footer="固定追加内容",
+        random_source=FirstRandom(),
+    )
+
+    assert result.plain == "#甲\n原始简介\n固定追加内容"
+    assert result.html == (
+        "<b>#甲</b>\n"
+        "<blockquote expandable>原始简介\n<b>固定追加内容</b></blockquote>"
+    )
+    parsed_text, entities = telethon_html.parse(result.html)
+    assert parsed_text == result.plain
+    assert sum(isinstance(entity, MessageEntityBold) for entity in entities) == 2
+    assert sum(isinstance(entity, MessageEntityBlockquote) for entity in entities) == 1
+
+
+def test_intro_footer_becomes_intro_when_source_intro_is_missing():
+    result = build_caption(
+        "演员：不会保留",
+        [],
+        [],
+        intro_footer="固定内容 <&>",
+    )
+
+    assert result.tags == ()
+    assert result.plain == "固定内容 <&>"
+    assert result.intro == "固定内容 <&>"
+    assert result.html == (
+        "<blockquote expandable><b>固定内容 &lt;&amp;&gt;</b></blockquote>"
+    )
+
+
+def test_intro_is_truncated_before_footer_so_footer_is_preserved():
+    result = build_caption(
+        "简介：1234567890",
+        [],
+        [],
+        intro_footer="页尾",
+        limit=9,
+    )
+
+    assert result.plain == "123...\n页尾"
+    assert result.html.endswith("123...\n<b>页尾</b></blockquote>")
+    assert len(result.plain.encode("utf-16-le")) // 2 <= 9
+
+
 def test_each_new_attempt_may_choose_a_different_random_set():
     source = "#一 #二 #三 #四 #五 #六 #七\n简介：内容"
 

@@ -2,6 +2,7 @@
 keep_tags = ["#正式启动前填写"]
 drop_tags = []
 caption_limit = 1024
+intro_footer = ""
 
 [schedule]
 timezone = "Asia/Shanghai"
