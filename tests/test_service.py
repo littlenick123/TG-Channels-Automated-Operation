@@ -7,7 +7,11 @@ import pytest
 from channel_operator.database import StateDatabase
 from channel_operator.models import DeliveryReceipt, MessageSnapshot, VideoInfo
 from channel_operator.service import AutomationService
-from channel_operator.telegram import ChannelGroupUnavailable, TelegramError
+from channel_operator.telegram import (
+    ChannelGroupUnavailable,
+    DownloadTooSlowError,
+    TelegramError,
+)
 
 
 class FakeTelegram:
@@ -82,6 +86,21 @@ class ExhaustedUploadTelegram(FakeTelegram):
     ):
         self.upload_files_existed = all(path.exists() for path in [*files, thumbnail])
         raise TelegramError("发送目标媒体组重试耗尽")
+
+
+class SlowFirstDownloadTelegram(FakeTelegram):
+    def __init__(self, snapshots, slow_message_id):
+        super().__init__(snapshots)
+        self.slow_message_id = slow_message_id
+
+    async def download_video(self, message_id, destination):
+        self.downloaded_message_ids.append(message_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if message_id == self.slow_message_id:
+            destination.with_name("source_video.mp4.part").write_bytes(b"partial")
+            raise DownloadTooSlowError(message_id, 123.4, 800, 60)
+        destination.write_bytes(b"source")
+        return destination
 
 
 class FakeMedia:
@@ -305,6 +324,54 @@ async def test_exhausted_upload_cleans_media_then_keeps_group_retryable(app_conf
 
     assert summary.retryable_failures == 1
     assert telegram.upload_files_existed is True
+    assert list(config.work_dir.iterdir()) == []
+    assert database.counts(str(group.source_channel))["retryable"] == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_low_speed_group_is_cleaned_marked_retryable_and_replaced(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    published_at = datetime.now(UTC) - timedelta(hours=1)
+    slow = MessageSnapshot(
+        message_id=10,
+        grouped_id=555,
+        caption="标签：#低速\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+    replacement = MessageSnapshot(
+        message_id=11,
+        grouped_id=556,
+        caption="标签：#替补\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+    database = StateDatabase(group.database_path)
+    database.save_messages(str(group.source_channel), [slow, replacement], 11)
+    database.refresh_groups(str(group.source_channel))
+    database.begin_attempt(str(group.source_channel), slow.grouped_id, "2026-08-11")
+    telegram = SlowFirstDownloadTelegram([slow, replacement], slow.message_id)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    summary = await service.run_once()
+
+    assert summary.published == 1
+    assert summary.retryable_failures == 1
+    assert telegram.downloaded_message_ids == [slow.message_id, replacement.message_id]
     assert list(config.work_dir.iterdir()) == []
     assert database.counts(str(group.source_channel))["retryable"] == 1
     database.close()

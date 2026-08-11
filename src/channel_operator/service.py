@@ -15,7 +15,12 @@ from .database import StateDatabase
 from .media import InvalidSourceMedia, MediaProcessor
 from .models import CaptionResult, MediaGroup, RunSummary
 from .reporting import BotReporter
-from .telegram import ChannelGroupUnavailable, SourceMediaUnavailable, TelegramGateway
+from .telegram import (
+    ChannelGroupUnavailable,
+    DownloadTooSlowError,
+    SourceMediaUnavailable,
+    TelegramGateway,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -241,6 +246,16 @@ class AutomationService:
                     self.source_key, group.grouped_id, str(exc), permanent=False
                 )
                 raise
+            except DownloadTooSlowError as exc:
+                LOGGER.warning(
+                    "媒体组 %s 下载持续低速，已停止并选择替补：%s",
+                    group.grouped_id,
+                    exc,
+                )
+                self.database.mark_failure(
+                    self.source_key, group.grouped_id, str(exc), permanent=False
+                )
+                summary.retryable_failures += 1
             except Exception as exc:
                 LOGGER.exception("媒体组 %s 处理失败", group.grouped_id)
                 self.database.mark_failure(

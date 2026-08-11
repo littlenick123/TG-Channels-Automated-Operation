@@ -47,6 +47,8 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.download_concurrency == 4
     assert config.download_stall_timeout_seconds == 120
+    assert config.download_low_speed_window_seconds == 60
+    assert config.download_low_speed_limit_kib_per_second == 800
     assert config.flood_sleep_threshold_seconds == 60
     assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
@@ -168,6 +170,58 @@ def test_download_stall_timeout_must_be_between_one_and_3600_seconds(
     monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
 
     with pytest.raises(ConfigError, match="download_stall_timeout_seconds"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "message"),
+    [
+        ("download_low_speed_window_seconds", 0, "window_seconds"),
+        ("download_low_speed_window_seconds", 3601, "window_seconds"),
+        ("download_low_speed_limit_kib_per_second", 0, "limit_kib_per_second"),
+    ],
+)
+def test_download_low_speed_settings_must_be_positive(
+    setting: str,
+    value: int,
+    message: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'work_dir = "./work"',
+            f'work_dir = "./work"\n{setting} = {value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+def test_stall_timeout_cannot_be_shorter_than_low_speed_window(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'work_dir = "./work"',
+            'work_dir = "./work"\n'
+            "download_stall_timeout_seconds = 30\n"
+            "download_low_speed_window_seconds = 60",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="不能小于"):
         load_config(path)
 
 

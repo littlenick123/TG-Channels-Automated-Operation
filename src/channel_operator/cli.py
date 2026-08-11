@@ -125,6 +125,14 @@ async def _run(arguments: argparse.Namespace) -> int:
                 "download_stall_timeout_seconds: "
                 f"{config.download_stall_timeout_seconds:g}"
             )
+            print(
+                "download_low_speed_window_seconds: "
+                f"{config.download_low_speed_window_seconds:g}"
+            )
+            print(
+                "download_low_speed_limit_kib_per_second: "
+                f"{config.download_low_speed_limit_kib_per_second:g}"
+            )
             bot_username = await reporter.doctor()
             print(f"report_bot: @{bot_username}")
             failed = False

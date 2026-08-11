@@ -16,8 +16,10 @@ from telethon.tl.types import (
 from channel_operator.models import DeliveryReceipt, VideoInfo
 from channel_operator.telegram import (
     ChannelGroupUnavailable,
+    DownloadTooSlowError,
     TelegramError,
     TelegramGateway,
+    _RollingDownloadSpeed,
 )
 
 
@@ -154,6 +156,34 @@ class StallingDownloadClient(ResumableDownloadClient):
                 position += stride
 
         return stream()
+
+
+class LowSpeedDownloadClient(ResumableDownloadClient):
+    def __init__(self, data: bytes, *, authorized: bool = True):
+        super().__init__(data)
+        self.authorized = authorized
+        self.disconnect_calls = 0
+        self.connect_calls = 0
+        self.authorization_checks = 0
+
+    def iter_download(self, message, **kwargs):
+        self.download_calls.append(kwargs)
+
+        async def stream():
+            await asyncio.Future()
+            yield b""
+
+        return stream()
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+
+    async def connect(self):
+        self.connect_calls += 1
+
+    async def is_user_authorized(self):
+        self.authorization_checks += 1
+        return self.authorized
 
 
 class ReconcilingGateway(TelegramGateway):
@@ -417,6 +447,75 @@ async def test_stalled_download_lane_is_cancelled_and_resumes_from_partial_file(
     assert "连续 0.02 秒无进展" in caplog.text
     assert f"从 {request_size * 2}/{len(data)} 字节继续" in caplog.text
     assert "进度 100.0%" in caplog.text
+
+
+def test_rolling_download_speed_uses_strict_threshold_boundary():
+    tracker = _RollingDownloadSpeed(60, 0, 0)
+
+    speed = tracker.sample(60, 800 * 1024 * 60)
+
+    assert speed == pytest.approx(800)
+    assert not speed < 800
+
+
+def test_rolling_download_speed_tolerates_a_short_pause_after_a_burst():
+    tracker = _RollingDownloadSpeed(60, 0, 0)
+    tracker.sample(30, 50 * 1024 * 1024)
+
+    speed = tracker.sample(60, 50 * 1024 * 1024)
+
+    assert speed is not None
+    assert speed > 800
+
+
+@pytest.mark.asyncio
+async def test_low_speed_bypasses_same_media_retry_and_reconnects_telegram(
+    app_config, tmp_path: Path
+):
+    client = LowSpeedDownloadClient(b"x" * (512 * 1024 * 2))
+    config = app_config(
+        retry_delays_seconds=(0, 0, 0),
+        download_concurrency=2,
+        download_stall_timeout_seconds=1,
+        download_low_speed_window_seconds=0.03,
+        download_low_speed_limit_kib_per_second=800,
+    )
+    gateway = ResumableGateway(config, config.channel_groups[0], client=client)
+    destination = tmp_path / "source_video.mp4"
+
+    with pytest.raises(DownloadTooSlowError, match="低于阈值"):
+        await gateway.download_video(3116, destination)
+
+    assert len(client.download_calls) == 2
+    assert client.disconnect_calls == 1
+    assert client.connect_calls == 1
+    assert client.authorization_checks == 1
+    assert destination.with_name("source_video.mp4.part").exists()
+
+
+@pytest.mark.asyncio
+async def test_failed_reconnect_after_low_speed_becomes_temporary_group_failure(
+    app_config, tmp_path: Path
+):
+    client = LowSpeedDownloadClient(
+        b"x" * (512 * 1024 * 2),
+        authorized=False,
+    )
+    config = app_config(
+        retry_delays_seconds=(0, 0, 0),
+        download_concurrency=2,
+        download_stall_timeout_seconds=1,
+        download_low_speed_window_seconds=0.03,
+        download_low_speed_limit_kib_per_second=800,
+    )
+    gateway = ResumableGateway(config, config.channel_groups[0], client=client)
+
+    with pytest.raises(ChannelGroupUnavailable, match="低速下载后重连 Telegram 失败"):
+        await gateway.download_video(3116, tmp_path / "source_video.mp4")
+
+    assert client.disconnect_calls == 1
+    assert client.connect_calls == 1
+    assert client.authorization_checks == 1
 
 
 @pytest.mark.asyncio

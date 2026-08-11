@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -43,12 +43,50 @@ CHANNEL_GROUP_ERRORS = (
 )
 
 
+class _RollingDownloadSpeed:
+    def __init__(self, window_seconds: float, started_at: float, start_offset: int):
+        self.window_seconds = window_seconds
+        self.samples: deque[tuple[float, int]] = deque([(started_at, start_offset)])
+
+    def sample(self, sampled_at: float, offset: int) -> float | None:
+        self.samples.append((sampled_at, offset))
+        cutoff = sampled_at - self.window_seconds
+        while len(self.samples) >= 2 and self.samples[1][0] <= cutoff:
+            self.samples.popleft()
+        baseline_at, baseline_offset = self.samples[0]
+        elapsed = sampled_at - baseline_at
+        if elapsed < self.window_seconds:
+            return None
+        return max(0, offset - baseline_offset) / elapsed / 1024
+
+
 class TelegramError(RuntimeError):
     """Raised when Telegram access or delivery fails."""
 
 
 class DownloadStalledError(OSError):
     """Raised when a Telegram download batch makes no progress in time."""
+
+
+class DownloadTooSlowError(TelegramError):
+    """Raised when actual writes stay below the configured rolling speed."""
+
+    def __init__(
+        self,
+        message_id: int,
+        speed_kib_per_second: float,
+        limit_kib_per_second: float,
+        window_seconds: float,
+    ):
+        self.message_id = message_id
+        self.speed_kib_per_second = speed_kib_per_second
+        self.limit_kib_per_second = limit_kib_per_second
+        self.window_seconds = window_seconds
+        super().__init__(
+            f"下载消息 {message_id} 最近 {window_seconds:g} 秒平均速度 "
+            f"{speed_kib_per_second:.1f} KiB/s，低于阈值 "
+            f"{limit_kib_per_second:g} KiB/s"
+        )
 
 
 class SourceMediaUnavailable(TelegramError):
@@ -304,6 +342,43 @@ class TelegramGateway:
                 close_timeout,
             )
 
+    async def _monitor_download_speed(
+        self,
+        message_id: int,
+        current_offset: Callable[[], int],
+        expected_size: int,
+        started_at: float,
+        start_offset: int,
+    ) -> None:
+        window = self.config.download_low_speed_window_seconds
+        limit = self.config.download_low_speed_limit_kib_per_second
+        sample_interval = min(5.0, window / 12)
+        tracker = _RollingDownloadSpeed(window, started_at, start_offset)
+        while True:
+            await asyncio.sleep(sample_interval)
+            offset = current_offset()
+            if offset >= expected_size:
+                return
+            speed = tracker.sample(time.monotonic(), offset)
+            if speed is not None and speed < limit:
+                raise DownloadTooSlowError(message_id, speed, limit, window)
+
+    async def _reconnect_after_slow_download(self, message_id: int) -> None:
+        LOGGER.warning(
+            "下载消息 %s 触发低速保护，正在重连 Telegram 以清除低速媒体连接",
+            message_id,
+        )
+        try:
+            await self.client.disconnect()
+            await self.client.connect()
+            if not await self.client.is_user_authorized():
+                raise TelegramError("重连后 Telethon 会话未授权")
+        except Exception as exc:
+            raise ChannelGroupUnavailable(
+                f"低速下载后重连 Telegram 失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        LOGGER.info("下载消息 %s 触发低速保护后 Telegram 重连成功", message_id)
+
     async def _download_message(
         self, message: Any, message_id: int, destination: Path
     ) -> Path:
@@ -356,6 +431,15 @@ class TelegramGateway:
             attempt_started_at = time.monotonic()
             attempt_start_offset = offset
             last_progress_log_at = attempt_started_at
+            low_speed_monitor = asyncio.create_task(
+                self._monitor_download_speed(
+                    message_id,
+                    lambda: offset,
+                    expected_size,
+                    attempt_started_at,
+                    attempt_start_offset,
+                )
+            )
             if concurrency:
                 LOGGER.info(
                     "下载消息 %s 使用 %s 路并发，分片大小 %s 字节",
@@ -391,10 +475,23 @@ class TelegramGateway:
                     batch = asyncio.gather(*tasks)
                     try:
                         done, _ = await asyncio.wait(
-                            {batch},
+                            {batch, low_speed_monitor},
                             timeout=self.config.download_stall_timeout_seconds,
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
-                        if not done:
+                        if low_speed_monitor in done:
+                            monitor_error = low_speed_monitor.exception()
+                            if monitor_error is not None:
+                                batch.cancel()
+                                for task in tasks:
+                                    if not task.done():
+                                        task.cancel()
+                                batch.add_done_callback(self._consume_future_result)
+                                raise monitor_error
+                            raise OSError(
+                                f"下载消息 {message_id} 的低速监控意外提前结束"
+                            )
+                        if batch not in done:
                             batch.cancel()
                             for task in tasks:
                                 if not task.done():
@@ -407,6 +504,9 @@ class TelegramGateway:
                             )
                         chunks = batch.result()
                     except BaseException as exc:
+                        if not batch.done():
+                            batch.cancel()
+                            batch.add_done_callback(self._consume_future_result)
                         for task in tasks:
                             if not task.done():
                                 task.cancel()
@@ -460,6 +560,15 @@ class TelegramGateway:
                         )
                         last_progress_log_at = now
             finally:
+                if not low_speed_monitor.done():
+                    low_speed_monitor.cancel()
+                await self._settle_cancelled_tasks(
+                    [low_speed_monitor],
+                    min(
+                        DOWNLOAD_STREAM_CLOSE_TIMEOUT_SECONDS,
+                        self.config.download_stall_timeout_seconds,
+                    ),
+                )
                 await self._close_download_streams(streams, message_id)
             handle.flush()
             os.fsync(handle.fileno())
@@ -483,6 +592,9 @@ class TelegramGateway:
 
         try:
             return await self._retry(operation, f"下载消息 {message_id}")
+        except DownloadTooSlowError:
+            await self._reconnect_after_slow_download(message_id)
+            raise
         except CHANNEL_GROUP_ERRORS as exc:
             raise ChannelGroupUnavailable(
                 f"下载源频道媒体失败：{type(exc).__name__}: {exc}"

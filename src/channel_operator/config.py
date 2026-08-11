@@ -100,6 +100,8 @@ class AppConfig:
     max_runtime_hours: float
     download_concurrency: int
     download_stall_timeout_seconds: float
+    download_low_speed_window_seconds: float
+    download_low_speed_limit_kib_per_second: float
     flood_sleep_threshold_seconds: int
     retry_delays_seconds: tuple[int, ...]
 
@@ -261,6 +263,12 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         download_stall_timeout_seconds=float(
             runtime.get("download_stall_timeout_seconds", 120)
         ),
+        download_low_speed_window_seconds=float(
+            runtime.get("download_low_speed_window_seconds", 60)
+        ),
+        download_low_speed_limit_kib_per_second=float(
+            runtime.get("download_low_speed_limit_kib_per_second", 800)
+        ),
         flood_sleep_threshold_seconds=int(
             runtime.get("flood_sleep_threshold_seconds", 60)
         ),
@@ -288,6 +296,18 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("download_concurrency 必须在 1 到 8 之间")
     if not 1 <= config.download_stall_timeout_seconds <= 3_600:
         raise ConfigError("download_stall_timeout_seconds 必须在 1 到 3600 秒之间")
+    if not 1 <= config.download_low_speed_window_seconds <= 3_600:
+        raise ConfigError("download_low_speed_window_seconds 必须在 1 到 3600 秒之间")
+    if config.download_low_speed_limit_kib_per_second <= 0:
+        raise ConfigError("download_low_speed_limit_kib_per_second 必须大于 0")
+    if (
+        config.download_stall_timeout_seconds
+        < config.download_low_speed_window_seconds
+    ):
+        raise ConfigError(
+            "download_stall_timeout_seconds 不能小于 "
+            "download_low_speed_window_seconds"
+        )
     if not 1 <= config.flood_sleep_threshold_seconds <= 86_400:
         raise ConfigError("flood_sleep_threshold_seconds 必须在 1 到 86400 秒之间")
     return config

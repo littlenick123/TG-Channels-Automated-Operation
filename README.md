@@ -401,8 +401,10 @@ database_dir = "./data"
 work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
-download_concurrency = 4
+download_concurrency = 6
 download_stall_timeout_seconds = 120
+download_low_speed_window_seconds = 60
+download_low_speed_limit_kib_per_second = 800
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 360]
 ```
@@ -450,6 +452,15 @@ retry_delays_seconds = [30, 120, 360]
 - 已经完整写入 `.part` 的分片会保留；下载器限时关闭旧连接后，按 `retry_delays_seconds` 从对齐断点继续，不会重新下载已保存部分。
 - Telegram 下载流关闭超过 10 秒时程序会放弃等待，防止频道组整体超时又卡在清理阶段。
 - 下载期间约每 30 秒记录一次完成百分比、字节数和本次平均速度；下载很快时至少会记录一次 100% 完成日志。
+
+#### `download_low_speed_window_seconds` 与 `download_low_speed_limit_kib_per_second`
+
+- 默认按最近 `60` 秒实际成功写入 `.part` 的字节数计算滚动平均速度，每 5 秒采样一次。
+- 最近 60 秒速度严格低于 `800 KiB/s` 时，当前媒体组判定为异常低速；正好等于阈值不会触发。
+- 下载未满一个完整窗口就完成时不会误判，已有 `.part` 的历史大小也不会计入当前窗口速度。
+- 低速异常不会进入同一媒体的网络重试：程序限时关闭下载流、清理当前工作目录、把媒体组标记为 `retryable`，然后选择替补。
+- 选择替补前会通过 Telethon 的公共接口断开并重新连接，清除可能已降速的 borrowed sender；重连失败时本次频道组按临时故障跳过，后续定时任务仍会重试。
+- `download_stall_timeout_seconds` 不能小于低速检测窗口；推荐组合是 `120 / 60 / 800`。
 
 #### `flood_sleep_threshold_seconds`
 
@@ -551,8 +562,10 @@ database_dir = "./data"
 work_dir = "./work"
 max_candidates_per_run = 12
 max_runtime_hours = 6
-download_concurrency = 4
+download_concurrency = 6
 download_stall_timeout_seconds = 120
+download_low_speed_window_seconds = 60
+download_low_speed_limit_kib_per_second = 800
 flood_sleep_threshold_seconds = 60
 retry_delays_seconds = [30, 120, 360]
 
@@ -1449,11 +1462,13 @@ watch -n 5 'find work -type f -name "*.part" -exec ls -lh {} \;'
 
 ```toml
 [runtime]
-download_concurrency = 4
+download_concurrency = 6
 download_stall_timeout_seconds = 120
+download_low_speed_window_seconds = 60
+download_low_speed_limit_kib_per_second = 800
 ```
 
-如果 4 路稳定且没有明显 FloodWait，可以测试 8；如果速度没有明显提升或错误增多，恢复为 4 或 2。单路下载流僵死超过 120 秒时，程序会自动关闭当前批次并按重试间隔从 `.part` 断点继续。
+推荐先使用 6 路；线路稳定时可以测试 8，如果速度没有明显提升或错误增多，恢复为 4。单路下载流僵死超过 120 秒时，程序会自动关闭当前批次并按重试间隔从 `.part` 断点继续；最近 60 秒低于 800 KiB/s 时则停止当前媒体组、重连 Telegram 并选择替补。
 
 ### FloodWait
 
