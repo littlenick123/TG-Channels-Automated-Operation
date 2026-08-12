@@ -1,53 +1,101 @@
+# 文案、标签过滤和固定追加内容
 [content]
+# 原文存在时优先保留的标签库，可配置几十个
 keep_tags = ["#必留标签"]
+# 从原文中强制删除的标签
 drop_tags = ["#删除标签1", "#删除标签2"]
+# Telegram 媒体说明最大长度，超出部分以 ... 结尾
 caption_limit = 1024
+# 简介末尾追加的加粗文字，空字符串表示不追加
 intro_footer = ""
 
+# 常驻任务的运行模式、时区和时间
 [schedule]
+# daily 每日定时运行；continuous 按频道组顺序循环
+mode = "daily"
+# 任务日期、定时和日报使用的 IANA 时区
 timezone = "Asia/Shanghai"
+# daily 为启动时间；continuous 为上一自然日日报时间
 daily_time = "00:01"
+# continuous 整轮零成功时等待秒数
+continuous_idle_seconds = 300
 
+# Telegram 报告机器人的显示和接收配置
 [reporting]
+# 每条机器人通知中显示的服务器名称
 server_name = "德国-G12"
+# 接收告警和汇总的私人会话 ID，可配置多个
 chat_ids = [
   123456789,
   987654321,
 ]
 
+# FFmpeg 转码、素材筛选和磁盘安全参数
 [processing]
+# FFmpeg 可执行文件名或绝对路径
 ffmpeg_path = "ffmpeg"
+# FFprobe 可执行文件名或绝对路径
 ffprobe_path = "ffprobe"
+# 单个视频编码最多使用的 CPU 线程数，4C VPS 可设为4
 ffmpeg_threads = 4
+# H.264 画质参数，数值越大体积越小、画质越低
 crf = 27
+# 编码速度与压缩效率平衡，可改为 fast、slow 等
 preset = "medium"
+# 输出 AAC 音频码率
 audio_bitrate = "128k"
+# 源视频短边最低像素，默认只处理1080P及以上
 minimum_source_short_edge = 1080
+# 新媒体组等待完整到达后才允许处理的秒数
 album_settle_seconds = 300
+# 除预计工作空间外额外保留的磁盘字节数，此处为1GiB
 disk_reserve_bytes = 1073741824
 
+# 数据目录、运行限制、下载并发和重试参数
 [runtime]
+# 频道组 SQLite 数据库和日报持久状态目录
 database_dir = "./data"
+# 下载、转码、截图和进程锁的临时工作目录
 work_dir = "./work"
+# 每次轮到单个频道组最多尝试的候选数量
 max_candidates_per_run = 12
+# 每次轮到单个频道组允许运行的最长小时数
 max_runtime_hours = 6
-download_concurrency = 6
+# 单个视频的并发分片下载路数，允许1到8
+download_concurrency = 8
+# 下载完全无进展多久后触发停滞处理
 download_stall_timeout_seconds = 120
+# 持续低速判断使用的滚动窗口秒数
 download_low_speed_window_seconds = 60
+# 窗口平均速度低于此值时换片
 download_low_speed_limit_kib_per_second = 800
+# Telethon 可自动等待的 FloodWait 最大秒数
 flood_sleep_threshold_seconds = 60
+# 网络和临时上传错误的分级重试间隔
 retry_delays_seconds = [30, 120, 360]
 
+# 第一组：严格按配置顺序先处理
 [[channel_groups]]
+# 稳定内部名称，用于数据库文件名和 --group 参数
 name = "channel_b"
+# 支持中文的显示备注，会出现在日志和机器人通知中
 remark = "欧美中文字幕"
+# 源频道数字 ID 或用户名
 source_channel = -1001234567890
+# 目标频道数字 ID 或用户名
 target_channel = -1009876543210
+# daily 为每日目标；continuous 为每轮目标
 daily_success_count = 4
 
+# 第二组：第一组结束后再处理
 [[channel_groups]]
+# 必须唯一且只能使用字母、数字、下划线或连字符
 name = "channel_c"
+# 仅作显示，可修改且不会改变数据库路径
 remark = "欧美精选"
+# 多个频道组可以共用同一个源频道
 source_channel = -1001234567890
+# 每个目标频道使用独立频道组数据库
 target_channel = -1009876543211
+# daily 为每日目标；continuous 为每轮目标
 daily_success_count = 2

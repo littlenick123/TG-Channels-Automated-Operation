@@ -374,7 +374,7 @@ class TelegramGateway:
             if not await self.client.is_user_authorized():
                 raise TelegramError("重连后 Telethon 会话未授权")
         except Exception as exc:
-            raise ChannelGroupUnavailable(
+            raise TelegramError(
                 f"低速下载后重连 Telegram 失败：{type(exc).__name__}: {exc}"
             ) from exc
         LOGGER.info("下载消息 %s 触发低速保护后 Telegram 重连成功", message_id)

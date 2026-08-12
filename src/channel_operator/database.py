@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .models import MediaGroup, MessageSnapshot
+from .models import DailyStats, MediaGroup, MessageSnapshot
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -103,6 +103,16 @@ class StateDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_media_groups_status
                 ON media_groups(source_channel, status, selected_date);
+
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                stats_date TEXT PRIMARY KEY,
+                published INTEGER NOT NULL DEFAULT 0,
+                attempted INTEGER NOT NULL DEFAULT 0,
+                rejected INTEGER NOT NULL DEFAULT 0,
+                retryable_failures INTEGER NOT NULL DEFAULT 0,
+                reconciled INTEGER NOT NULL DEFAULT 0,
+                paused_reason TEXT
+            );
             """
         )
         self.connection.commit()
@@ -285,13 +295,28 @@ class StateDatabase:
         minimum_short_edge: int,
         settle_seconds: int,
         excluded: set[int],
+        retryable_before_date: str | None = None,
     ) -> MediaGroup | None:
         cutoff = (datetime.now(UTC) - timedelta(seconds=settle_seconds)).isoformat()
         placeholders = ",".join("?" for _ in excluded)
         excluded_sql = (
             f"AND CAST(grouped_id AS INTEGER) NOT IN ({placeholders})" if excluded else ""
         )
-        parameters: list[Any] = [source_channel, minimum_short_edge, cutoff, *sorted(excluded)]
+        retryable_sql = ""
+        retryable_parameters: list[Any] = []
+        if retryable_before_date is not None:
+            retryable_sql = (
+                "AND (status != 'retryable' OR selected_date IS NULL "
+                "OR selected_date < ?)"
+            )
+            retryable_parameters.append(retryable_before_date)
+        parameters: list[Any] = [
+            source_channel,
+            minimum_short_edge,
+            cutoff,
+            *retryable_parameters,
+            *sorted(excluded),
+        ]
         row = self.connection.execute(
             f"""
             SELECT * FROM media_groups
@@ -300,8 +325,10 @@ class StateDatabase:
               AND video_count = 1
               AND MIN(width, height) >= ?
               AND newest_message_at <= ?
+              {retryable_sql}
               {excluded_sql}
-            ORDER BY selected_date, updated_at
+            ORDER BY CASE WHEN status = 'uploading' THEN 0 ELSE 1 END,
+                     selected_date, updated_at
             LIMIT 1
             """,
             parameters,
@@ -325,21 +352,114 @@ class StateDatabase:
         return self._to_group(row) if row else None
 
     def preview_candidates(
-        self, source_channel: str, minimum_short_edge: int, settle_seconds: int, limit: int
+        self,
+        source_channel: str,
+        minimum_short_edge: int,
+        settle_seconds: int,
+        limit: int,
+        retryable_before_date: str | None = None,
     ) -> list[MediaGroup]:
         cutoff = (datetime.now(UTC) - timedelta(seconds=settle_seconds)).isoformat()
+        retryable_sql = ""
+        parameters: list[Any] = [source_channel, minimum_short_edge, cutoff]
+        if retryable_before_date is not None:
+            retryable_sql = (
+                "AND (status != 'retryable' OR selected_date IS NULL "
+                "OR selected_date < ?)"
+            )
+            parameters.append(retryable_before_date)
+        parameters.append(limit)
         rows = self.connection.execute(
-            """
+            f"""
             SELECT * FROM media_groups
             WHERE source_channel = ?
               AND status IN ('indexed', 'selected', 'retryable', 'downloading',
                              'transcoding', 'uploading')
               AND video_count = 1 AND MIN(width, height) >= ? AND newest_message_at <= ?
+              {retryable_sql}
             ORDER BY RANDOM() LIMIT ?
             """,
-            (source_channel, minimum_short_edge, cutoff, limit),
+            parameters,
         ).fetchall()
         return [self._to_group(row) for row in rows]
+
+    def record_daily_stats(
+        self,
+        stats_date: str,
+        *,
+        published: int = 0,
+        attempted: int = 0,
+        rejected: int = 0,
+        retryable_failures: int = 0,
+        reconciled: int = 0,
+        paused_reason: str | None = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO daily_stats (
+                stats_date, published, attempted, rejected,
+                retryable_failures, reconciled, paused_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(stats_date) DO UPDATE SET
+                published=daily_stats.published + excluded.published,
+                attempted=daily_stats.attempted + excluded.attempted,
+                rejected=daily_stats.rejected + excluded.rejected,
+                retryable_failures=(
+                    daily_stats.retryable_failures + excluded.retryable_failures
+                ),
+                reconciled=daily_stats.reconciled + excluded.reconciled,
+                paused_reason=COALESCE(excluded.paused_reason, daily_stats.paused_reason)
+            """,
+            (
+                stats_date,
+                published,
+                attempted,
+                rejected,
+                retryable_failures,
+                reconciled,
+                paused_reason,
+            ),
+        )
+        self.connection.commit()
+
+    def daily_stats(self, stats_date: str) -> DailyStats:
+        row = self.connection.execute(
+            "SELECT * FROM daily_stats WHERE stats_date = ?", (stats_date,)
+        ).fetchone()
+        if row is None:
+            return DailyStats(stats_date=stats_date)
+        return DailyStats(
+            stats_date=str(row["stats_date"]),
+            published=int(row["published"]),
+            attempted=int(row["attempted"]),
+            rejected=int(row["rejected"]),
+            retryable_failures=int(row["retryable_failures"]),
+            reconciled=int(row["reconciled"]),
+            paused_reason=row["paused_reason"],
+        )
+
+    def continuous_report_cursor(self, default_date: str) -> str:
+        key = "continuous:last_report_date"
+        row = self.connection.execute(
+            "SELECT value FROM metadata WHERE key = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            return str(row["value"])
+        self.connection.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)", (key, default_date)
+        )
+        self.connection.commit()
+        return default_date
+
+    def set_continuous_report_cursor(self, report_date: str) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO metadata(key, value) VALUES ('continuous:last_report_date', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (report_date,),
+        )
+        self.connection.commit()
 
     def begin_attempt(self, source_channel: str, grouped_id: int, run_date: str) -> None:
         self.connection.execute(

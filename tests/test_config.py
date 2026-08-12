@@ -39,7 +39,9 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     config = load_config(path)
 
     assert config.keep_tags == ("#保留",)
+    assert config.schedule_mode == "daily"
     assert config.daily_time == "00:01"
+    assert config.continuous_idle_seconds == 300
     assert [group.name for group in config.channel_groups] == ["channel_b"]
     assert config.channel_groups[0].remark == "欧美中文字幕"
     assert config.channel_groups[0].display_name == "channel_b（欧美中文字幕）"
@@ -299,6 +301,79 @@ daily_success_count = 2
         "channel_b.db",
         "channel_c.db",
     ]
+
+
+@pytest.mark.parametrize("mode", ["daily", "continuous"])
+def test_schedule_mode_is_loaded(mode: str, tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'daily_time = "00:01"',
+            f'mode = "{mode}"\ndaily_time = "00:01"\ncontinuous_idle_seconds = 60',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    config = load_config(path)
+
+    assert config.schedule_mode == mode
+    assert config.continuous_idle_seconds == 60
+
+
+def test_invalid_schedule_mode_is_rejected(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'daily_time = "00:01"', 'mode = "loop"\ndaily_time = "00:01"'
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="daily 或 continuous"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("value", [0, 86_401, '"invalid"'])
+def test_continuous_idle_seconds_is_validated(
+    value: int | str, tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'daily_time = "00:01"',
+            f'daily_time = "00:01"\ncontinuous_idle_seconds = {value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="continuous_idle_seconds"):
+        load_config(path)
+
+
+def test_cycle_success_count_is_rejected(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            "daily_success_count = 4",
+            "daily_success_count = 4\ncycle_success_count = 2",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="不支持 cycle_success_count"):
+        load_config(path)
 
 
 def test_per_group_database_path_is_rejected(tmp_path: Path, monkeypatch):

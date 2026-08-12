@@ -375,3 +375,73 @@ async def test_low_speed_group_is_cleaned_marked_retryable_and_replaced(app_conf
     assert list(config.work_dir.iterdir()) == []
     assert database.counts(str(group.source_channel))["retryable"] == 1
     database.close()
+
+
+@pytest.mark.asyncio
+async def test_continuous_mode_uses_per_cycle_target_not_daily_total(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    published_at = datetime.now(UTC) - timedelta(hours=1)
+    snapshots = [
+        MessageSnapshot(
+            message_id=index,
+            grouped_id=600 + index,
+            caption=f"标签：#循环{index}\n简介：内容{index}",
+            is_video=True,
+            is_photo=False,
+            width=1920,
+            height=1080,
+            duration=180,
+            file_size=100,
+            published_at=published_at,
+        )
+        for index in (1, 2)
+    ]
+    database = StateDatabase(group.database_path)
+    telegram = FakeTelegram(snapshots)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    first = await service.run_once(continuous=True)
+    second = await service.run_once(continuous=True)
+
+    assert first.published == 1
+    assert second.published == 1
+    assert len(telegram.downloaded_message_ids) == 2
+    assert database.published_count(str(group.source_channel), first.run_date) == 2
+    stats = database.daily_stats(first.run_date)
+    assert stats.published == 2
+    assert stats.attempted == 2
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_continuous_mode_does_not_retry_failed_media_on_same_date(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=20,
+        grouped_id=620,
+        caption="标签：#低速\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    database = StateDatabase(group.database_path)
+    telegram = SlowFirstDownloadTelegram(source, source.message_id)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    first = await service.run_once(continuous=True)
+    second = await service.run_once(continuous=True)
+
+    assert first.retryable_failures == 1
+    assert second.attempted == 0
+    assert telegram.downloaded_message_ids == [source.message_id]
+    database.close()

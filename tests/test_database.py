@@ -106,3 +106,89 @@ def test_database_identity_prevents_cross_channel_reuse(tmp_path):
             source_channel=-1001,
             target_channel=-1003,
         )
+
+
+def test_continuous_retryable_candidate_waits_until_next_date(tmp_path):
+    database = StateDatabase(tmp_path / "state.db")
+    database.save_messages(
+        "source",
+        [snapshot(1, 10, video=True, width=1920, height=1080, caption="#一")],
+        1,
+    )
+    database.refresh_groups("source")
+    database.begin_attempt("source", 10, "2026-08-12")
+    database.mark_failure("source", 10, "临时失败", permanent=False)
+
+    assert (
+        database.next_candidate(
+            "source",
+            "2026-08-12",
+            1080,
+            0,
+            set(),
+            retryable_before_date="2026-08-12",
+        )
+        is None
+    )
+    candidate = database.next_candidate(
+        "source",
+        "2026-08-13",
+        1080,
+        0,
+        set(),
+        retryable_before_date="2026-08-13",
+    )
+    assert candidate is not None
+    assert candidate.grouped_id == 10
+    database.close()
+
+
+def test_uploading_candidate_bypasses_continuous_retry_cooldown(tmp_path):
+    database = StateDatabase(tmp_path / "state.db")
+    database.save_messages(
+        "source",
+        [snapshot(1, 10, video=True, width=1920, height=1080, caption="#一")],
+        1,
+    )
+    database.refresh_groups("source")
+    database.begin_attempt("source", 10, "2026-08-12")
+    database.begin_upload("source", 10, "<b>#一</b>", "#一")
+
+    candidate = database.next_candidate(
+        "source",
+        "2026-08-12",
+        1080,
+        0,
+        set(),
+        retryable_before_date="2026-08-12",
+    )
+
+    assert candidate is not None
+    assert candidate.status == "uploading"
+    database.close()
+
+
+def test_daily_stats_and_report_cursor_persist_across_reopen(tmp_path):
+    path = tmp_path / "state.db"
+    database = StateDatabase(path)
+    database.record_daily_stats(
+        "2026-08-12",
+        published=2,
+        attempted=3,
+        retryable_failures=1,
+        paused_reason="频道被封",
+    )
+    assert database.continuous_report_cursor("2026-08-11") == "2026-08-11"
+    database.set_continuous_report_cursor("2026-08-12")
+    database.close()
+
+    reopened = StateDatabase(path)
+    stats = reopened.daily_stats("2026-08-12")
+
+    assert stats.published == 2
+    assert stats.attempted == 3
+    assert stats.retryable_failures == 1
+    assert stats.paused_reason == "频道被封"
+    assert stats.has_activity is True
+    assert reopened.continuous_report_cursor("2026-01-01") == "2026-08-12"
+    reopened.close()

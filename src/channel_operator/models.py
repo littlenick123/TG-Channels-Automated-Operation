@@ -78,6 +78,28 @@ class RunSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyStats:
+    stats_date: str
+    published: int = 0
+    attempted: int = 0
+    rejected: int = 0
+    retryable_failures: int = 0
+    reconciled: int = 0
+    paused_reason: str | None = None
+
+    @property
+    def has_activity(self) -> bool:
+        return bool(
+            self.published
+            or self.attempted
+            or self.rejected
+            or self.retryable_failures
+            or self.reconciled
+            or self.paused_reason
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryReceipt:
     message_ids: tuple[int, ...]
     grouped_id: int

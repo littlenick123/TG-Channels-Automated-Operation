@@ -91,7 +91,9 @@ class AppConfig:
     caption_limit: int
     intro_footer: str
     timezone: ZoneInfo
+    schedule_mode: str
     daily_time: str
+    continuous_idle_seconds: int
     ffmpeg_path: str
     ffprobe_path: str
     ffmpeg_threads: int
@@ -162,6 +164,17 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     daily_time = str(schedule.get("daily_time", "00:01"))
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
         raise ConfigError("daily_time 必须使用 HH:MM 24 小时格式")
+    schedule_mode = str(schedule.get("mode", "daily")).strip().lower()
+    if schedule_mode not in {"daily", "continuous"}:
+        raise ConfigError("schedule.mode 只能是 daily 或 continuous")
+    try:
+        continuous_idle_seconds = int(
+            schedule.get("continuous_idle_seconds", 300)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("continuous_idle_seconds 必须是整数") from exc
+    if not 1 <= continuous_idle_seconds <= 86_400:
+        raise ConfigError("continuous_idle_seconds 必须在 1 到 86400 秒之间")
     try:
         timezone = ZoneInfo(str(schedule.get("timezone", "Asia/Shanghai")))
     except Exception as exc:
@@ -205,6 +218,11 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             raise ConfigError(
                 f"频道组 {name} 不再使用 database_path；"
                 "请在 [runtime] 中统一配置 database_dir"
+            )
+        if "cycle_success_count" in raw_group:
+            raise ConfigError(
+                f"频道组 {name} 不支持 cycle_success_count；"
+                "两种模式统一使用 daily_success_count"
             )
         database_path = database_dir / f"{name}.db"
         path_key = os.path.normcase(str(database_path))
@@ -278,7 +296,9 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         caption_limit=int(content.get("caption_limit", 1024)),
         intro_footer=intro_footer,
         timezone=timezone,
+        schedule_mode=schedule_mode,
         daily_time=daily_time,
+        continuous_idle_seconds=continuous_idle_seconds,
         ffmpeg_path=str(processing.get("ffmpeg_path", "ffmpeg")),
         ffprobe_path=str(processing.get("ffprobe_path", "ffprobe")),
         ffmpeg_threads=int(processing.get("ffmpeg_threads", 3)),

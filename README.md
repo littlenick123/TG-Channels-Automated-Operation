@@ -50,6 +50,7 @@
 - 使用一次 Telethon 相册发送，将视频和三张截图作为同一个媒体组发布。
 - 文案只附在媒体组第一个视频上，视频启用流式播放。
 - 每个频道组分别配置每日成功数量，并按唯一组名自动创建独立数据库。
+- 支持每日定时和频道组连续循环两种运行模式，共用同一个数量配置和数据库。
 - 频道被封、不可访问、无发帖权限或数据库异常时跳过当前频道组并继续后续组。
 - 使用独立 Telegram Bot API 机器人向私人会话发送即时告警和最终汇总。
 - 最终汇总显示全部频道组从开始处理到全部完成或跳过的总耗时。
@@ -317,9 +318,18 @@ intro_footer = "点击频道名称查看更多内容"
 
 ```toml
 [schedule]
+mode = "daily"
 timezone = "Asia/Shanghai"
 daily_time = "00:01"
+continuous_idle_seconds = 300
 ```
+
+#### `mode`
+
+- `daily`：默认模式，每天在 `daily_time` 执行一次，按当天累计数量补足任务。
+- `continuous`：循环模式，容器启动后立即按频道组顺序持续处理，不等待 `daily_time`。
+- 旧配置未填写 `mode` 时自动使用 `daily`，升级后原有行为不变。
+- 修改模式后需要重启常驻容器；首次部署包含此功能的新源码时需要重新构建镜像。
 
 #### `timezone`
 
@@ -329,9 +339,17 @@ daily_time = "00:01"
 #### `daily_time`
 
 - 必须使用 24 小时制 `HH:MM` 格式。
-- Docker 中的 `schedule` 常驻命令会按这个时间自动运行，不需要另外配置 cron 或 systemd timer。
-- 容器在当天计划时间之前启动时会等待到点；在计划时间之后启动时会立即补跑一次。
+- `daily` 模式下是每天任务的启动时间；容器在计划时间之后启动时会立即补跑一次。
+- `continuous` 模式下是发送上一自然日累计汇总的时间。正在处理媒体时不会强制中断，完成当前安全步骤后补发。
+- Docker 中的 `schedule` 常驻命令会根据 `mode` 自动运行，不需要另外配置 cron 或 systemd timer。
 - 修改时间或时区后执行 `docker compose restart channel-operator`，让常驻调度器重新读取配置。
+
+#### `continuous_idle_seconds`
+
+- continuous 模式一整轮所有频道组都没有成功发布时的等待时间，范围 `1–86400` 秒，默认 `300` 秒。
+- 本轮至少成功发布一个媒体组时不等待，立即从第一个频道组开始下一轮。
+- 该等待可避免所有组无素材或已暂停时反复增量扫描和产生 FloodWait。
+- daily 模式会读取并校验该配置，但不会使用它。
 
 ### `[reporting]` 机器人报告
 
@@ -510,7 +528,7 @@ daily_success_count = 4
 | `remark` | 否 | 便于辨识频道组的单行中文备注，最多 100 个字符；机器人告警、最终汇总和命令行输出会显示该备注。 |
 | `source_channel` | 是 | 源频道数字 ID 或用户名。多个频道组可以使用同一个源频道。 |
 | `target_channel` | 是 | 目标频道数字 ID 或用户名。用户账号必须具有发帖权限。 |
-| `daily_success_count` | 是 | 当前频道组每天希望达到的成功发布数量，必须大于 0 且不能超过 `max_candidates_per_run`。 |
+| `daily_success_count` | 是 | daily 模式为当天累计目标；continuous 模式为每次轮到该组时的本轮目标。必须大于 0 且不能超过 `max_candidates_per_run`。 |
 
 不允许再在 `[[channel_groups]]` 中配置 `database_path`。每个组的 `name` 必须唯一，程序会在全局 `database_dir` 下自动创建同名数据库。例如：
 
@@ -547,12 +565,14 @@ remark = "欧美精选"
 # ...
 ```
 
-每日数量是数据库状态，不是简单的“每次命令再发送 N 组”。例如 `channel_b` 的目标为 4：
+daily 模式下数量是数据库状态，不是简单的“每次命令再发送 N 组”。例如 `channel_b` 的目标为 4：
 
 - 今天已经成功 0 组：本次最多补到 4。
 - 今天已经成功 3 组：本次只需要再成功 1 组。
 - 今天已经成功 4 组：本次不再发布，随后进入下一频道组。
 - 明天运行：按新日期重新以 4 组为目标。
+
+continuous 模式下同一个字段表示每轮目标。例如 B 配置4组、C配置2组，顺序为 `B处理4组 → C处理2组 → B处理4组 → C处理2组`。循环模式没有每日发布上限，已经发布的素材仍不会重复使用。不要配置 `cycle_success_count`，程序会拒绝该字段，避免两套数量发生歧义。
 
 每个数据库还会保存频道组名称、源频道和目标频道身份。如果修改了已有组的源频道或目标频道，但继续使用相同组名，程序会拒绝运行该组并通过机器人告警，避免状态串用。
 
@@ -573,8 +593,10 @@ caption_limit = 1024
 intro_footer = "点击频道名称查看更多内容"
 
 [schedule]
+mode = "daily"
 timezone = "Asia/Shanghai"
 daily_time = "00:01"
+continuous_idle_seconds = 300
 
 [reporting]
 server_name = "德国-G12"
@@ -795,23 +817,36 @@ dry-run 不会：
 .venv/bin/channel-operator --config config.toml run-once --group channel_b
 ```
 
-程序会先检查当前组当天已经成功发布多少组，再补足到 `daily_success_count`。全部频道组结束后，报告机器人发送统一摘要。
+`daily` 模式会检查当天已经成功发布多少组，再补足到 `daily_success_count` 并发送统一摘要。`continuous` 模式则将此命令视为手动执行一轮：每组从0开始处理到 `daily_success_count`，不发送每轮正常汇总；即时故障告警仍会发送。
 
 ### `schedule`
 
-常驻运行，并按照 `[schedule]` 中的 `timezone` 和 `daily_time` 每天调用一次完整 `run-once`：
+按照 `[schedule] mode` 常驻运行：
 
 ```bash
 .venv/bin/channel-operator --config config.toml schedule
 ```
 
-Docker 镜像默认执行这个命令。行为如下：
+Docker 镜像默认执行这个命令。
+
+`daily` 模式行为：
 
 - 启动时间早于当天计划时间：等待到计划时间执行。
 - 启动时间晚于或等于当天计划时间：立即补跑一次。
 - 一次任务完成或部分频道组失败后：调度器保持运行，等待下一天。
 - 容器重启后即使再次触发当天任务，SQLite 每日计数也只会补足差额，不会重复发布已经成功的素材。
 - 修改 `config.toml` 的运行时间后需要重启常驻进程。
+
+`continuous` 模式行为：
+
+- 容器启动后立即从第一个频道组开始，不等待 `daily_time`。
+- 每组成功处理自己的 `daily_success_count` 后才进入下一组，全部组完成后构成一轮。
+- 一轮至少成功发布一组时立即开始下一轮；一轮零成功时等待 `continuous_idle_seconds`。
+- 每次轮到频道组都会增量索引源频道，新帖子会自动进入候选。
+- 临时失败素材当天不再重试，次日重新成为候选；`uploading` 状态仍优先核对，防止重复发布。
+- 频道被封、不可访问、目标无发帖权限或数据库身份异常时，该组在当前进程内暂停。首次发送即时告警，后续轮次直接跳过；重启容器后重新检查。
+- 不发送每轮正常汇总；每天在 `daily_time` 后发送上一自然日累计汇总。统计和报告游标保存在各组 SQLite 中，容器重启不会清零或重复报告。
+- 离线期间没有统计活动的日期不会发送空报告；报告发送失败后至少等待5分钟再重试。
 
 ### 退出码
 
@@ -926,6 +961,7 @@ channel_c 完成
 - 上传开始时间和固定文案。
 - 目标消息 ID 和目标 `grouped_id`。
 - 发布日期和错误信息。
+- continuous 模式的每日累计统计和日报发送游标。
 - 频道组名称、源频道和目标频道身份。
 
 运行期间可能同时看到：
@@ -1102,8 +1138,10 @@ TZ=Asia/Shanghai
 
 ```toml
 [schedule]
+mode = "daily"
 timezone = "Asia/Shanghai"
 daily_time = "00:01"
+continuous_idle_seconds = 300
 
 [runtime]
 database_dir = "./data"
@@ -1221,7 +1259,7 @@ docker compose logs --tail=100 channel-operator
 channel-operator --config /app/config.toml schedule
 ```
 
-调度规则：
+`daily` 模式调度规则：
 
 - 容器在当天 `daily_time` 之前启动：等待到点运行。
 - 容器在当天 `daily_time` 之后启动：立即补跑一次。
@@ -1229,6 +1267,15 @@ channel-operator --config /app/config.toml schedule
 - 一组失败不会结束常驻调度器，下一天会继续检查。
 - 容器重启后再次补跑也会先读取 SQLite 的当天完成数，只补足差额。
 - 修改 `daily_time`、`timezone` 或频道组后，执行 `docker compose restart channel-operator` 重新加载配置。
+
+`continuous` 模式将 `mode` 改为 `continuous` 后重启容器：
+
+```bash
+docker compose restart channel-operator
+docker compose logs -f --tail=100 channel-operator
+```
+
+循环模式启动后立即工作，严格按照配置中的频道组顺序轮转。`daily_time` 只用于每日汇总，不再作为启动处理的时间。
 
 ### 9. 查看日志和资源
 
@@ -1783,7 +1830,7 @@ docker stats channel-operator
 
 ### 当天立即运行却显示已经完成
 
-`daily_success_count` 是每日目标。数据库已经记录该组当天完成数量时，再次运行不会超额发布。
+这只适用于 `mode = "daily"`：`daily_success_count` 是每日目标，数据库已经记录该组当天完成数量时，再次运行不会超额发布。`mode = "continuous"` 时该字段是每轮目标，不受当天累计数量限制。
 
 可以：
 

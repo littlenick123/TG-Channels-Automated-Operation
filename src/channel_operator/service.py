@@ -5,6 +5,7 @@ import logging
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -67,13 +68,21 @@ class AutomationService:
         )
         return group_count
 
-    async def dry_run(self) -> list[tuple[int, str]]:
+    def _today(self) -> str:
+        return datetime.now(self.config.timezone).date().isoformat()
+
+    def _record_stats(self, *, stats_date: str | None = None, **values: int) -> None:
+        self.database.record_daily_stats(stats_date or self._today(), **values)
+
+    async def dry_run(self, *, continuous: bool = False) -> list[tuple[int, str]]:
         await self.index()
+        today = self._today()
         candidates = self.database.preview_candidates(
             self.source_key,
             self.config.minimum_source_short_edge,
             self.config.album_settle_seconds,
             self.config.max_candidates_per_run,
+            retryable_before_date=today if continuous else None,
         )
         previews = []
         for candidate in candidates:
@@ -109,7 +118,9 @@ class AutomationService:
             with suppress(OSError):
                 group_root.rmdir()
 
-    async def _reconcile(self, group: MediaGroup, run_date: str) -> bool:
+    async def _reconcile(
+        self, group: MediaGroup, run_date: str, *, continuous: bool
+    ) -> bool:
         if group.status != "uploading" or not group.upload_started_at:
             return False
         receipt = await self.telegram.find_matching_album(
@@ -122,23 +133,37 @@ class AutomationService:
                 "上次上传结果不确定，未自动重发，请人工核对目标频道",
                 permanent=True,
             )
+            if continuous:
+                self._record_stats(rejected=1)
             await self.reporter.send(
                 f"⚠️ 频道组 {self.group.display_name}\n"
                 f"源媒体组 {group.grouped_id} 的上传结果不确定，"
                 "已暂停该媒体组，请人工核对目标频道。"
             )
             return False
+        published_date = self._today() if continuous else run_date
         self.database.mark_published(
             self.source_key,
             group.grouped_id,
             list(receipt.message_ids),
             receipt.grouped_id,
-            run_date,
+            published_date,
         )
+        if continuous:
+            self._record_stats(
+                stats_date=published_date,
+                published=1,
+                reconciled=1,
+            )
         return True
 
     async def _process_group(
-        self, group: MediaGroup, run_date: str, caption: CaptionResult
+        self,
+        group: MediaGroup,
+        run_date: str,
+        caption: CaptionResult,
+        *,
+        continuous: bool,
     ) -> None:
         directory = self._work_directory(group)
         directory.mkdir(parents=True, exist_ok=False)
@@ -170,22 +195,34 @@ class AutomationService:
                 video_info=output_info,
                 thumbnail=thumbnail,
             )
+            published_date = self._today() if continuous else run_date
             self.database.mark_published(
                 self.source_key,
                 group.grouped_id,
                 list(receipt.message_ids),
                 receipt.grouped_id,
-                run_date,
+                published_date,
             )
+            if continuous:
+                self._record_stats(stats_date=published_date, published=1)
         finally:
             self._cleanup(directory)
 
-    async def run_once(self) -> RunSummary:
+    async def run_once(
+        self,
+        *,
+        continuous: bool = False,
+        safe_point: Callable[[], Awaitable[None]] | None = None,
+    ) -> RunSummary:
         await self.index()
-        run_date = datetime.now(self.config.timezone).date().isoformat()
+        run_date = self._today()
         summary = RunSummary(
             run_date=run_date,
-            published=self.database.published_count(self.source_key, run_date),
+            published=(
+                0
+                if continuous
+                else self.database.published_count(self.source_key, run_date)
+            ),
         )
         attempted_groups: set[int] = set()
         deadline = time.monotonic() + self.config.max_runtime_hours * 3600
@@ -195,18 +232,21 @@ class AutomationService:
             and summary.attempted < self.config.max_candidates_per_run
             and time.monotonic() < deadline
         ):
+            if safe_point is not None:
+                await safe_point()
             group = self.database.next_candidate(
                 self.source_key,
                 run_date,
                 self.config.minimum_source_short_edge,
                 self.config.album_settle_seconds,
                 attempted_groups,
+                retryable_before_date=self._today() if continuous else None,
             )
             if group is None:
                 break
             attempted_groups.add(group.grouped_id)
             if group.status == "uploading":
-                if await self._reconcile(group, run_date):
+                if await self._reconcile(group, run_date, continuous=continuous):
                     summary.published += 1
                     summary.reconciled += 1
                 else:
@@ -214,7 +254,12 @@ class AutomationService:
                 continue
 
             summary.attempted += 1
-            self.database.begin_attempt(self.source_key, group.grouped_id, run_date)
+            attempt_date = self._today() if continuous else run_date
+            self.database.begin_attempt(
+                self.source_key, group.grouped_id, attempt_date
+            )
+            if continuous:
+                self._record_stats(stats_date=attempt_date, attempted=1)
             caption = build_caption(
                 group.caption,
                 self.config.keep_tags,
@@ -229,11 +274,19 @@ class AutomationService:
                     self.source_key, group.grouped_id, reason, permanent=True
                 )
                 summary.rejected += 1
+                if continuous:
+                    self._record_stats(rejected=1)
                 continue
             try:
                 remaining = max(1, deadline - time.monotonic())
                 await asyncio.wait_for(
-                    self._process_group(group, run_date, caption), timeout=remaining
+                    self._process_group(
+                        group,
+                        run_date,
+                        caption,
+                        continuous=continuous,
+                    ),
+                    timeout=remaining,
                 )
             except (InvalidSourceMedia, SourceMediaUnavailable) as exc:
                 LOGGER.warning("媒体组 %s 永久无效：%s", group.grouped_id, exc)
@@ -241,10 +294,14 @@ class AutomationService:
                     self.source_key, group.grouped_id, str(exc), permanent=True
                 )
                 summary.rejected += 1
+                if continuous:
+                    self._record_stats(rejected=1)
             except ChannelGroupUnavailable as exc:
                 self.database.mark_failure(
                     self.source_key, group.grouped_id, str(exc), permanent=False
                 )
+                if continuous:
+                    self._record_stats(retryable_failures=1)
                 raise
             except DownloadTooSlowError as exc:
                 LOGGER.warning(
@@ -256,12 +313,16 @@ class AutomationService:
                     self.source_key, group.grouped_id, str(exc), permanent=False
                 )
                 summary.retryable_failures += 1
+                if continuous:
+                    self._record_stats(retryable_failures=1)
             except Exception as exc:
                 LOGGER.exception("媒体组 %s 处理失败", group.grouped_id)
                 self.database.mark_failure(
                     self.source_key, group.grouped_id, str(exc), permanent=False
                 )
                 summary.retryable_failures += 1
+                if continuous:
+                    self._record_stats(retryable_failures=1)
             else:
                 summary.published += 1
         return summary

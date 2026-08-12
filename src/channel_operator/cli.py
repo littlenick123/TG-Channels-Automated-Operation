@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from datetime import datetime
 
 from .config import AppConfig, ChannelGroupConfig, ConfigError, load_config
 from .database import StateDatabase
@@ -10,7 +11,7 @@ from .locking import AlreadyRunningError, ProcessLock
 from .media import MediaProcessor
 from .reporting import BotReporter, ReporterError
 from .runner import MultiChannelRunner
-from .scheduler import run_scheduler
+from .scheduler import run_continuous_scheduler, run_scheduler
 from .service import AutomationService
 from .telegram import TelegramError, TelegramGateway
 
@@ -40,10 +41,10 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--group", help="只检查指定频道组")
     index = commands.add_parser("index", help="建立或更新源频道索引")
     index.add_argument("--group", help="只索引指定频道组")
-    run = commands.add_parser("run-once", help="执行一次每日任务")
+    run = commands.add_parser("run-once", help="执行一次每日任务或一轮循环")
     run.add_argument("--dry-run", action="store_true", help="仅预览选材和文案")
     run.add_argument("--group", help="只运行指定频道组")
-    commands.add_parser("schedule", help="常驻运行并按配置时间每天执行")
+    commands.add_parser("schedule", help="按配置常驻执行每日或循环任务")
     return parser
 
 
@@ -85,10 +86,62 @@ async def _report_group_error(
     )
 
 
+async def _run_continuous(config: AppConfig) -> int:
+    config.work_dir.mkdir(parents=True, exist_ok=True)
+    media = MediaProcessor(config)
+    telegram = TelegramGateway(config)
+    reporter = BotReporter(config.reporting)
+    paused_groups: dict[str, str] = {}
+    try:
+        await telegram.connect()
+        runner = MultiChannelRunner(config, telegram, media, reporter)
+
+        async def run_cycle() -> int:
+            async def safe_point() -> None:
+                try:
+                    await report_due(datetime.now(config.timezone))
+                except Exception:
+                    logging.exception("媒体处理安全点检查连续模式日报失败")
+
+            results = await runner.run_once(
+                config.channel_groups,
+                continuous=True,
+                send_summary=False,
+                paused_groups=paused_groups,
+                safe_point=safe_point,
+            )
+            return sum(
+                result.summary.published
+                for result in results
+                if result.summary is not None
+            )
+
+        async def report_due(now) -> None:
+            await runner.send_due_continuous_reports(
+                config.channel_groups,
+                now=now,
+                paused_groups=paused_groups,
+            )
+
+        lock_path = config.work_dir / ".channel-operator.lock"
+        with ProcessLock(lock_path):
+            return await run_continuous_scheduler(
+                config,
+                run_cycle,
+                report_due,
+            )
+    finally:
+        await reporter.close()
+        await telegram.disconnect()
+
+
 async def _run(arguments: argparse.Namespace) -> int:
     config = load_config(arguments.config)
 
     if arguments.command == "schedule":
+        if config.schedule_mode == "continuous":
+            return await _run_continuous(config)
+
         async def run_job() -> int:
             daily_arguments = argparse.Namespace(
                 config=arguments.config,
@@ -122,6 +175,9 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"FFmpeg: {ffmpeg}")
             print(f"FFprobe: {ffprobe}")
             print(f"work_dir: {config.work_dir}")
+            print(f"schedule_mode: {config.schedule_mode}")
+            print(f"daily_time: {config.daily_time}")
+            print(f"continuous_idle_seconds: {config.continuous_idle_seconds}")
             print(f"download_concurrency: {config.download_concurrency}")
             print(
                 "download_stall_timeout_seconds: "
@@ -203,7 +259,9 @@ async def _run(arguments: argparse.Namespace) -> int:
                             media,
                             reporter,
                         )
-                        previews = await service.dry_run()
+                        previews = await service.dry_run(
+                            continuous=config.schedule_mode == "continuous"
+                        )
                         print(f"\n[{group.display_name}]")
                         if not previews:
                             print("没有符合条件的未处理媒体组")
@@ -218,7 +276,12 @@ async def _run(arguments: argparse.Namespace) -> int:
                             database.close()
                 return 2 if failed else 0
             runner = MultiChannelRunner(config, telegram, media, reporter)
-            results = await runner.run_once(groups)
+            continuous = config.schedule_mode == "continuous"
+            results = await runner.run_once(
+                groups,
+                continuous=continuous,
+                send_summary=not continuous,
+            )
             for result in results:
                 status = "已跳过" if result.skipped_reason else "完成"
                 print(

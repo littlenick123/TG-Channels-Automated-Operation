@@ -510,7 +510,7 @@ async def test_failed_reconnect_after_low_speed_becomes_temporary_group_failure(
     )
     gateway = ResumableGateway(config, config.channel_groups[0], client=client)
 
-    with pytest.raises(ChannelGroupUnavailable, match="低速下载后重连 Telegram 失败"):
+    with pytest.raises(TelegramError, match="低速下载后重连 Telegram 失败"):
         await gateway.download_video(3116, tmp_path / "source_video.mp4")
 
     assert client.disconnect_calls == 1

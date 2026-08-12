@@ -5,7 +5,11 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from channel_operator.scheduler import next_run_at, run_scheduler
+from channel_operator.scheduler import (
+    next_run_at,
+    run_continuous_scheduler,
+    run_scheduler,
+)
 
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 
@@ -75,3 +79,66 @@ async def test_scheduler_survives_job_exception(app_config):
     )
 
     assert code == 0
+
+
+@pytest.mark.asyncio
+async def test_continuous_scheduler_starts_immediately_and_only_idles_empty_cycle(
+    app_config,
+):
+    config = app_config(schedule_mode="continuous", continuous_idle_seconds=300)
+    published = iter((2, 0, 1))
+    cycles = []
+    reports = []
+    delays = []
+
+    async def run_cycle():
+        value = next(published)
+        cycles.append(value)
+        return value
+
+    async def report_due(now):
+        reports.append(now)
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    code = await run_continuous_scheduler(
+        config,
+        run_cycle,
+        report_due,
+        sleep=sleep,
+        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=TIMEZONE),
+        max_cycles=3,
+    )
+
+    assert code == 0
+    assert cycles == [2, 0, 1]
+    assert delays == [300]
+    assert len(reports) == 6
+
+
+@pytest.mark.asyncio
+async def test_continuous_scheduler_survives_cycle_exception_and_idles(app_config):
+    config = app_config(schedule_mode="continuous", continuous_idle_seconds=60)
+    delays = []
+
+    async def failing_cycle():
+        raise RuntimeError("temporary")
+
+    async def report_due(now):
+        return None
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    code = await run_continuous_scheduler(
+        config,
+        failing_cycle,
+        report_due,
+        sleep=sleep,
+        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=TIMEZONE),
+        max_cycles=2,
+    )
+
+    assert code == 0
+    assert delays == [60]
