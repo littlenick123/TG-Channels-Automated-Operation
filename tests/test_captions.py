@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from telethon.extensions import html as telethon_html
 from telethon.tl.types import MessageEntityBlockquote, MessageEntityBold
 
@@ -16,7 +17,7 @@ class LastRandom:
         return list(reversed(population))[:count]
 
 
-def test_caption_prioritizes_present_keep_tags_and_drops_forbidden():
+def test_caption_prioritizes_tags_and_uses_last_nonempty_line_as_intro():
     source = "#甲 #必留 #删除 #乙 #丙 #丁 #戊\n简介：这是简介\n演员：不保留"
 
     result = build_caption(
@@ -28,9 +29,9 @@ def test_caption_prioritizes_present_keep_tags_and_drops_forbidden():
 
     assert result.tags == ("#必留", "#甲", "#乙", "#丙", "#丁")
     assert "#删除" not in result.plain
-    assert result.plain.endswith("这是简介")
-    assert result.html.endswith("<blockquote expandable>这是简介</blockquote>")
-    assert "演员" not in result.plain
+    assert "这是简介" not in result.plain
+    assert result.plain.endswith("演员：不保留")
+    assert result.html.endswith("<blockquote expandable>演员：不保留</blockquote>")
 
 
 def test_tag_line_is_bold_and_has_no_blank_line_before_intro():
@@ -71,7 +72,7 @@ def test_intro_footer_is_bold_inside_the_same_collapsed_quote():
 
 def test_intro_footer_becomes_intro_when_source_intro_is_missing():
     result = build_caption(
-        "演员：不会保留",
+        "【标签】：",
         [],
         [],
         intro_footer="固定内容 <&>",
@@ -118,12 +119,85 @@ def test_large_keep_library_still_outputs_only_first_five_present_tags():
     assert result.tags == tuple(keep_tags[:5])
 
 
-def test_missing_intro_and_too_few_tags_are_allowed():
+def test_ordinary_last_line_becomes_intro_with_too_few_tags():
     result = build_caption("#一 #二\n其他：不会保留", [], [])
 
     assert set(result.tags) == {"#一", "#二"}
+    assert result.intro == "其他：不会保留"
+    assert result.plain.endswith("其他：不会保留")
+
+
+def test_trailing_blank_lines_are_ignored_when_selecting_intro():
+    result = build_caption("标签：#甲\n最后一行简介\n \n\t\n", [], [])
+
+    assert result.tags == ("#甲",)
+    assert result.intro == "最后一行简介"
+
+
+def test_empty_labelled_intro_uses_only_footer():
+    result = build_caption(
+        "标签：#甲\n前面的普通信息\n简介：\n\n",
+        [],
+        [],
+        intro_footer="自定义文案",
+    )
+
+    assert result.plain == "#甲\n自定义文案"
+    assert result.intro == "自定义文案"
+    assert result.html.endswith(
+        "<blockquote expandable><b>自定义文案</b></blockquote>"
+    )
+
+
+@pytest.mark.parametrize(
+    "tag_line",
+    [
+        "【标         签】：#甲 #乙",
+        "【标签】：#甲 #乙",
+        "【标 签】: #甲 #乙",
+        "【　标　签　】：#甲 #乙",
+    ],
+)
+def test_bracketed_tag_line_is_extracted_and_not_used_as_intro(tag_line):
+    result = build_caption(
+        f"简介：旧简介\n{tag_line}\n\n",
+        [],
+        [],
+        intro_footer="自定义文案",
+        random_source=FirstRandom(),
+    )
+
+    assert result.tags == ("#甲", "#乙")
+    assert result.plain == "#甲 #乙\n自定义文案"
+    assert "旧简介" not in result.plain
+
+
+@pytest.mark.parametrize("tag_line", ["标签：#甲 #乙", "标签: #甲 #乙", "#甲 #乙"])
+def test_all_supported_tag_lines_as_last_line_leave_source_intro_empty(tag_line):
+    result = build_caption(
+        f"前面的普通信息\n{tag_line}",
+        [],
+        [],
+        intro_footer="自定义文案",
+        random_source=FirstRandom(),
+    )
+
+    assert result.tags == ("#甲", "#乙")
+    assert result.plain == "#甲 #乙\n自定义文案"
+    assert "前面的普通信息" not in result.plain
+
+
+def test_tags_are_collected_and_deduplicated_only_once():
+    result = build_caption(
+        "标签：#甲 #乙\n【标 签】：#甲 #乙 #丙",
+        [],
+        [],
+        random_source=FirstRandom(),
+    )
+
+    assert result.tags == ("#甲", "#乙", "#丙")
+    assert result.plain == "#甲 #乙 #丙"
     assert result.intro is None
-    assert "其他" not in result.plain
 
 
 def test_html_is_escaped_and_truncated_intro_ends_with_ellipsis():

@@ -178,7 +178,7 @@ async def test_empty_caption_is_rejected_before_download_and_replaced(app_config
     empty = MessageSnapshot(
         message_id=1,
         grouped_id=111,
-        caption="演员：没有标签也没有简介",
+        caption="标签：@没有有效标签",
         is_video=True,
         is_photo=False,
         width=1920,
@@ -226,7 +226,7 @@ async def test_dry_run_filters_empty_caption_and_returns_replacement(app_config)
         MessageSnapshot(
             message_id=1,
             grouped_id=111,
-            caption="其他：空文案",
+            caption="标签：@没有有效标签",
             is_video=True,
             is_photo=False,
             width=1920,

@@ -10,7 +10,9 @@ from .models import CaptionResult
 
 HASHTAG_RE = re.compile(r"(?<!\w)#[\w]+", re.UNICODE)
 INTRO_RE = re.compile(r"^\s*简介\s*[:：]\s*(.*?)\s*$")
-TAG_LINE_RE = re.compile(r"^\s*标签\s*[:：]\s*(.*?)\s*$")
+TAG_LINE_RE = re.compile(
+    r"^\s*(?:标签|【\s*标\s*签\s*】)\s*[:：]\s*(.*?)\s*$"
+)
 
 
 def normalize_tag(tag: str) -> str:
@@ -51,27 +53,39 @@ def _truncate_utf16_with_ellipsis(value: str, limit: int) -> str:
     return f"{prefix}{ellipsis}"
 
 
-def _source_tags(text: str) -> list[str]:
-    unique: dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.lstrip()
-        labelled = TAG_LINE_RE.match(line)
-        if not stripped.startswith("#") and labelled is None:
-            continue
-        content = labelled.group(1) if labelled is not None else stripped
-        for match in HASHTAG_RE.finditer(content):
-            tag = match.group(0)
-            unique.setdefault(normalize_tag(tag), tag)
-    return list(unique.values())
-
-
-def _intro(text: str) -> str | None:
-    for line in text.splitlines():
-        match = INTRO_RE.match(line)
-        if match:
-            value = match.group(1).strip()
-            return value or None
+def _tag_line_content(line: str) -> str | None:
+    labelled = TAG_LINE_RE.match(line)
+    if labelled is not None:
+        return labelled.group(1)
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        return stripped
     return None
+
+
+def _parse_source(text: str) -> tuple[list[str], str | None]:
+    unique: dict[str, str] = {}
+    last_line: str | None = None
+    last_tag_content: str | None = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        tag_content = _tag_line_content(line)
+        if tag_content is not None:
+            for match in HASHTAG_RE.finditer(tag_content):
+                tag = match.group(0)
+                unique.setdefault(normalize_tag(tag), tag)
+        last_line = line
+        last_tag_content = tag_content
+
+    source_intro: str | None = None
+    if last_line is not None and last_tag_content is None:
+        intro_match = INTRO_RE.match(last_line)
+        if intro_match is not None:
+            source_intro = intro_match.group(1).strip() or None
+        else:
+            source_intro = last_line.strip() or None
+    return list(unique.values()), source_intro
 
 
 def build_caption(
@@ -84,7 +98,7 @@ def build_caption(
     random_source: secrets.SystemRandom | None = None,
 ) -> CaptionResult:
     rng = random_source or secrets.SystemRandom()
-    source_tags = _source_tags(source)
+    source_tags, source_intro = _parse_source(source)
     source_by_key = {normalize_tag(tag): tag for tag in source_tags}
     dropped = {normalize_tag(tag) for tag in drop_tags}
 
@@ -112,7 +126,6 @@ def build_caption(
     chosen = tuple(fitted)
 
     tag_line = " ".join(chosen)
-    source_intro = _intro(source)
     footer = intro_footer.strip()
     separator = "\n" if tag_line and (source_intro or footer) else ""
     available = limit - _utf16_length(tag_line) - _utf16_length(separator)

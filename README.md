@@ -31,6 +31,7 @@
 - [多频道串行、数据库和失败处理](#多频道串行数据库和失败处理)
 - [Docker 生产部署](#docker-生产部署)
 - [更新源码和升级](#更新源码和升级)
+- [迁移到新服务器](#迁移到新服务器)
 - [日志与故障排查](#日志与故障排查)
 - [安全建议](#安全建议)
 - [开发与测试](#开发与测试)
@@ -296,16 +297,21 @@ intro_footer = "点击频道名称查看更多内容"
 
 ```text
 标签：#中文字幕 #Wifey #欧美精选 @kakasp
+【标         签】：#中文字幕 #Wifey #欧美精选 @kakasp
 ```
 
-`@用户名` 不作为标签处理。简介只读取以下格式的当前行：
+方括号格式中“标”和“签”之间允许存在任意数量的空白，也支持半角冒号。`@用户名` 不作为标签处理。同一个标签在多条标签行中重复出现时只计算一次；标签收集、过滤和随机选择只执行一次。
+
+简介使用源文案的最后一个非空行，文案末尾多余的空行会被忽略。如果最后一行使用以下格式，则去掉“简介”和冒号，只保留后面的内容：
 
 ```text
 简介：这里是简介内容
 简介: 这里是简介内容
 ```
 
-其他行不会保留。发送时标签整行使用粗体，标签与简介之间只保留一个换行、不留空白行；简介使用 Telegram HTML 可折叠引用格式。配置 `intro_footer` 后，固定文字在引用内另起一行并加粗；没有源简介时则单独作为简介。简介很短时，客户端可能不会显示展开按钮。标签、源简介和 `intro_footer` 都不存在时，该源媒体组会在下载前永久跳过，并自动选择替补。
+最后一行是普通内容时，整行直接作为简介；此前出现的 `简介：` 行不再优先。如果最后一行是 `标签：...`、`【标 签】：...` 或以 `#` 开头的标签行，则该行仍正常参与标签提取，但源简介视为空。此时配置了 `intro_footer` 就只使用自定义文案作为简介，未配置则只发送标签。最后一行只有空的 `简介：` 时同样视为没有源简介。
+
+除最后一个非空行外，其他普通信息行不会保留。发送时标签整行使用粗体，标签与简介之间只保留一个换行、不留空白行；简介使用 Telegram HTML 可折叠引用格式。配置 `intro_footer` 后，固定文字在引用内另起一行并加粗；没有源简介时则单独作为简介。简介很短时，客户端可能不会显示展开按钮。标签、源简介和 `intro_footer` 都不存在时，该源媒体组会在下载前永久跳过，并自动选择替补。
 
 ### `[schedule]` 时区和运行日期
 
@@ -1339,6 +1345,250 @@ docker image prune
 ```
 
 此命令不会删除正在使用的镜像，也不会删除项目的 bind mount 数据。执行前仍应先检查 `docker image ls`。
+
+## 迁移到新服务器
+
+服务器迁移时，不需要复制整个旧系统或 Docker 容器。新服务器从 Git 仓库重新取得源码并重新构建镜像，只需从旧服务器迁移以下运行数据：
+
+- `config.toml`：频道组、媒体处理和运行参数。
+- `.env`：Telegram API 凭据、报告机器人令牌和 Session 路径等敏感变量。
+- `data/`：Telethon Session、各频道组 SQLite 数据库及其发布状态。
+
+通常不要迁移以下内容：
+
+- `work/`：下载、转码和截图的临时工作目录，新服务器创建空目录即可。
+- `.venv/`：宿主机虚拟环境，Docker 部署不会使用它。
+- Docker 镜像、容器和容器日志：应在新服务器上重新构建。
+- `__pycache__/`、测试缓存等可重建文件。
+
+迁移 `data/` 后，已发布素材、当天成功数量、索引进度和失败状态都会保留。同一天在新服务器启动时，程序只会补足尚未完成的数量，不会从零重新计算。
+
+> **重要：**旧服务器与新服务器不能同时运行同一份 Telethon Session 和频道数据库，否则可能导致重复发布、SQLite 写入冲突或 Telegram 会话异常。迁移期间必须先停止旧服务器，确认新服务器正常后再决定是否退役旧服务器。
+
+### 1. 在旧服务器等待当前媒体组完成
+
+先进入项目目录并查看最新日志：
+
+```bash
+cd /opt/telegram/TG-Channels-Automated-Operation
+docker compose logs --tail=100 channel-operator
+docker compose ps
+```
+
+如果日志显示正在下载、转码或上传，最好等待当前媒体组完成并进入下一次定时等待状态。这样可以减少需要重新处理的文件，也便于确认数据库状态。
+
+如果必须立即迁移，也可以优雅停止容器。未完成媒体组会根据数据库中的状态在新服务器重新处理或执行上传结果核对；`work/` 中的半成品不需要迁移。
+
+### 2. 停止旧服务器上的容器
+
+```bash
+docker compose stop -t 600 channel-operator
+docker compose ps
+```
+
+`stop -t 600` 最多给程序 10 分钟完成清理。确认 `docker compose ps` 中服务已停止后再备份，以确保 SQLite 的 WAL 数据已经写回，Session 文件不再被修改。
+
+不要在备份完成后重新启动旧服务器上的容器。
+
+### 3. 打包配置、Session 和数据库
+
+仍在旧服务器项目目录中执行：
+
+```bash
+tar -czpf /root/channel-operator-migration.tar.gz \
+  config.toml .env data
+
+chmod 600 /root/channel-operator-migration.tar.gz
+sha256sum /root/channel-operator-migration.tar.gz
+```
+
+记下 `sha256sum` 输出的校验值，传输到新服务器后需要再次核对。
+
+迁移包中包含 API 凭据、机器人令牌和已登录的 Telegram Session，等同于敏感账号资料。不要上传到 GitHub、网盘公开链接或发送给无关人员。
+
+### 4. 将迁移包传到新服务器
+
+在旧服务器执行，将 `NEW_SERVER_IP` 替换为新服务器 IP：
+
+```bash
+scp /root/channel-operator-migration.tar.gz \
+  root@NEW_SERVER_IP:/root/
+```
+
+如果新服务器的 SSH 端口不是 `22`，例如使用 `2222`：
+
+```bash
+scp -P 2222 /root/channel-operator-migration.tar.gz \
+  root@NEW_SERVER_IP:/root/
+```
+
+也可以先把迁移包下载到可信的本地电脑，再上传至新服务器，但传输过程中应始终避免泄露该文件。
+
+### 5. 准备新服务器
+
+在新服务器上先按 [Docker 生产部署](#docker-生产部署) 中的安装步骤安装 Docker，然后设置时区：
+
+```bash
+timedatectl set-timezone Asia/Shanghai
+timedatectl
+```
+
+从远程仓库重新克隆源码。以下地址中的用户名和仓库名需要替换为自己的实际地址：
+
+```bash
+mkdir -p /opt/telegram
+cd /opt/telegram
+git clone https://github.com/你的用户名/你的仓库.git \
+  TG-Channels-Automated-Operation
+cd /opt/telegram/TG-Channels-Automated-Operation
+```
+
+如果项目希望放在 `/opt/TG-Channels-Automated-Operation`，同样可以正常运行：
+
+```bash
+cd /opt
+git clone https://github.com/你的用户名/你的仓库.git \
+  TG-Channels-Automated-Operation
+cd /opt/TG-Channels-Automated-Operation
+```
+
+Compose 使用相对于项目目录的 bind mount，不强制要求 `/opt/telegram/TG-Channels-Automated-Operation`。后续命令只需始终在实际项目目录执行。
+
+### 6. 校验并恢复迁移数据
+
+先在新服务器核对迁移包。输出必须与旧服务器记录的 SHA-256 值完全一致：
+
+```bash
+sha256sum /root/channel-operator-migration.tar.gz
+```
+
+确认无误后，在新服务器的项目根目录中解压：
+
+```bash
+tar -xzpf /root/channel-operator-migration.tar.gz
+mkdir -p work
+
+chmod 600 config.toml .env
+chmod 700 data work
+find data -type f -name '*.session' -exec chmod 600 {} \;
+```
+
+检查关键文件是否存在：
+
+```bash
+ls -la config.toml .env data work
+find data -maxdepth 1 -type f -printf '%f  %s bytes\n'
+```
+
+应能看到 Telethon `.session` 文件和每个频道组对应的 `.db` 文件。不要只复制 `.db` 而遗漏 Session，也不要创建空数据库覆盖迁移过来的数据库。
+
+如果旧、新服务器上的项目路径不同，一般无需修改配置中的相对路径，例如 `./data` 和 `./work`。如果 `.env` 或 `config.toml` 使用了旧服务器的绝对路径，则必须改成新服务器的实际路径。
+
+### 7. 检查新版本配置项
+
+如果新服务器克隆的源码比旧服务器运行的版本更新，迁移过来的 `config.toml` 可能缺少新参数。对照仓库中的 `config.example.toml` 检查，但不要直接用示例覆盖真实配置。
+
+当前推荐的下载相关配置如下：
+
+```toml
+[runtime]
+database_dir = "./data"
+work_dir = "./work"
+download_concurrency = 6
+download_stall_timeout_seconds = 120
+download_low_speed_window_seconds = 60
+download_low_speed_limit_kib_per_second = 800
+retry_delays_seconds = [30, 120, 360]
+```
+
+其中 `download_stall_timeout_seconds` 不能小于 `download_low_speed_window_seconds`。频道组数据库会根据唯一组名自动保存在 `database_dir` 下，不需要在每个频道组中配置 `database_path`。
+
+### 8. 构建镜像并执行迁移检查
+
+在新服务器项目目录中构建镜像：
+
+```bash
+docker compose build --pull
+```
+
+旧服务器容器保持停止，然后在新服务器执行 `doctor`：
+
+```bash
+docker compose run --rm channel-operator \
+  --config /app/config.toml doctor
+```
+
+`doctor` 会检查 FFmpeg、目录、SQLite 身份、Telegram 用户会话、频道访问权限和报告机器人，并会向配置的 `chat_ids` 发送测试消息。
+
+如果提示用户会话未授权或 Session 已失效，执行登录命令重新授权：
+
+```bash
+docker compose run --rm channel-operator \
+  --config /app/config.toml login
+```
+
+新 IP 登录可能触发 Telegram 的新登录提醒，这是正常的安全提示；请核对登录位置和时间确实属于新服务器。
+
+### 9. 启动新服务器并观察日志
+
+`doctor` 全部通过后启动调度容器：
+
+```bash
+docker compose up -d --remove-orphans
+docker compose ps
+docker compose logs -f --tail=100 channel-operator
+```
+
+启动后重点确认：
+
+- 日志显示所有频道组按配置顺序加载。
+- 数据库没有身份不匹配或损坏提示。
+- 当天已经完成的数量仍然保留。
+- 调度器显示下一次正确的北京时间运行时间。
+- 机器人能够收到测试通知和后续任务汇总。
+
+迁移时数据库中的状态按以下方式继续处理：
+
+- `published`：视为已成功发布，不会重新选择。
+- `retryable`：以后仍允许重新尝试。
+- 下载或转码中断：临时文件不迁移，新服务器会重新下载或处理。
+- 上传结果不确定：程序会先核对目标频道近期媒体组，避免直接重复发布。
+
+### 10. 回滚到旧服务器
+
+如果新服务器检查失败，需要临时回到旧服务器，必须先停止新服务器：
+
+```bash
+cd /opt/telegram/TG-Channels-Automated-Operation
+docker compose stop -t 600 channel-operator
+docker compose ps
+```
+
+确认新服务器容器已经停止后，才能在旧服务器的原项目目录启动：
+
+```bash
+docker compose start channel-operator
+docker compose logs -f --tail=100 channel-operator
+```
+
+如果新服务器已经成功发布过内容，直接启动旧服务器的旧数据库可能不知道这些新发布记录。此时应先把新服务器最新的 `data/` 反向迁回旧服务器，或者继续修复新服务器，不要让两份已分叉的数据库交替运行。
+
+### 11. 迁移完成后的处理
+
+建议让新服务器稳定运行数天并确认每日任务和机器人汇总正常，再删除旧服务器及迁移包。迁移包删除前应保留在仅 root 可读的位置；如果继续作为灾难恢复备份，应放入受控、加密的备份存储。
+
+完整迁移检查清单：
+
+- [ ] 旧服务器当前媒体组已经完成，或已优雅停止。
+- [ ] 旧服务器容器已停止且未设置为自动重新启动。
+- [ ] `config.toml`、`.env` 和完整 `data/` 已打包。
+- [ ] 新旧迁移包的 SHA-256 校验值一致。
+- [ ] 新服务器已安装 Docker 并设置正确时区。
+- [ ] 新服务器已从 Git 仓库取得最新源码并重新构建镜像。
+- [ ] `doctor` 检查通过，报告机器人收到测试消息。
+- [ ] 新服务器已启动且日志、每日计数和调度时间正常。
+- [ ] 任意时刻只有一台服务器运行该项目。
+- [ ] 新服务器稳定后再清理旧服务器和敏感迁移包。
 
 ## 日志与故障排查
 
