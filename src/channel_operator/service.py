@@ -61,7 +61,7 @@ class AutomationService:
         group_count = self.database.refresh_groups(self.source_key)
         LOGGER.info(
             "频道组 %s 索引完成：新消息 %s 条，媒体组总数 %s",
-            self.group.name,
+            self.group.display_name,
             scanned,
             group_count,
         )
@@ -123,7 +123,7 @@ class AutomationService:
                 permanent=True,
             )
             await self.reporter.send(
-                f"⚠️ 频道组 {self.group.name}\n"
+                f"⚠️ 频道组 {self.group.display_name}\n"
                 f"源媒体组 {group.grouped_id} 的上传结果不确定，"
                 "已暂停该媒体组，请人工核对目标频道。"
             )

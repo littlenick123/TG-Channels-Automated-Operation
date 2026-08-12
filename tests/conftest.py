@@ -28,7 +28,9 @@ def app_config(tmp_path: Path):
         phone="+8613800000000",
         session_path=tmp_path / "data" / "session",
         channel_groups=(group,),
-        reporting=ReportingConfig("123456:test-token", (123456789,)),
+        reporting=ReportingConfig(
+            "123456:test-token", (123456789,), "测试服务器"
+        ),
         keep_tags=("#必留",),
         drop_tags=("#删除",),
         caption_limit=1024,
@@ -65,6 +67,7 @@ def app_config(tmp_path: Path):
                 "target_channel",
                 "database_path",
                 "daily_success_count",
+                "remark",
             )
             if key in changes
         }

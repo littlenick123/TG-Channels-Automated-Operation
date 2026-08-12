@@ -13,6 +13,7 @@ drop_tags = ["#删除"]
 [schedule]
 daily_time = "00:01"
 [reporting]
+server_name = "德国-G12"
 chat_ids = [123456789, 987654321]
 [processing]
 ffmpeg_threads = 3
@@ -21,6 +22,7 @@ database_dir = "./data"
 work_dir = "./work"
 [[channel_groups]]
 name = "channel_b"
+remark = "欧美中文字幕"
 source_channel = -1001
 target_channel = -1002
 daily_success_count = 4
@@ -39,12 +41,15 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.keep_tags == ("#保留",)
     assert config.daily_time == "00:01"
     assert [group.name for group in config.channel_groups] == ["channel_b"]
+    assert config.channel_groups[0].remark == "欧美中文字幕"
+    assert config.channel_groups[0].display_name == "channel_b（欧美中文字幕）"
     assert config.database_dir == (tmp_path / "data").resolve()
     assert config.channel_groups[0].database_path == (
         tmp_path / "data/channel_b.db"
     ).resolve()
     assert config.channel_groups[0].daily_success_count == 4
     assert config.reporting.chat_ids == (123456789, 987654321)
+    assert config.reporting.server_name == "德国-G12"
     assert config.download_concurrency == 4
     assert config.download_stall_timeout_seconds == 120
     assert config.download_low_speed_window_seconds == 60
@@ -52,6 +57,52 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.flood_sleep_threshold_seconds == 60
     assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
+
+
+def test_channel_group_remark_is_optional_and_does_not_change_database_name(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace('remark = "欧美中文字幕"\n', ""),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    group = load_config(path).channel_groups[0]
+
+    assert group.remark == ""
+    assert group.display_name == "channel_b"
+    assert group.database_path.name == "channel_b.db"
+
+
+@pytest.mark.parametrize(
+    ("remark_value", "message"),
+    [
+        ('"第一行\\n第二行"', "必须是单行文本"),
+        ("123", "必须是字符串"),
+        (f'"{"中" * 101}"', "不能超过 100 个字符"),
+    ],
+)
+def test_channel_group_remark_is_validated(
+    remark_value: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace('remark = "欧美中文字幕"', f"remark = {remark_value}"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
 
 
 def test_intro_footer_is_loaded_and_trimmed(tmp_path: Path, monkeypatch):
@@ -309,6 +360,48 @@ def test_report_bot_token_is_required(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("TG_REPORT_BOT_TOKEN", raising=False)
 
     with pytest.raises(ConfigError, match="TG_REPORT_BOT_TOKEN"):
+        load_config(path)
+
+
+def test_report_server_name_defaults_to_system_hostname(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace('server_name = "德国-G12"\n', ""),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+    monkeypatch.setattr("channel_operator.config.socket.gethostname", lambda: "host-a")
+
+    assert load_config(path).reporting.server_name == "host-a"
+
+
+@pytest.mark.parametrize(
+    ("server_name", "message"),
+    [
+        ('""', "不能为空"),
+        ('"第一行\\n第二行"', "必须是单行文本"),
+        ("123", "必须是字符串"),
+        (f'"{"服" * 101}"', "不能超过 100 个字符"),
+    ],
+)
+def test_report_server_name_is_validated(
+    server_name: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace('server_name = "德国-G12"', f"server_name = {server_name}"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
         load_config(path)
 
 

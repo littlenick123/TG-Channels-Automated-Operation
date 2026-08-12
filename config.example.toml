@@ -9,6 +9,7 @@ timezone = "Asia/Shanghai"
 daily_time = "00:01"
 
 [reporting]
+server_name = "德国-G12"
 chat_ids = [
   123456789,
   987654321,
@@ -39,12 +40,14 @@ retry_delays_seconds = [30, 120, 360]
 
 [[channel_groups]]
 name = "channel_b"
+remark = "欧美中文字幕"
 source_channel = -1001234567890
 target_channel = -1009876543210
 daily_success_count = 4
 
 [[channel_groups]]
 name = "channel_c"
+remark = "欧美精选"
 source_channel = -1001234567890
 target_channel = -1009876543211
 daily_success_count = 2

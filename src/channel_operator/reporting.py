@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 from typing import Any
 
 import httpx
@@ -27,6 +28,9 @@ class BotReporter:
         client: httpx.AsyncClient | None = None,
     ):
         self.config = config
+        self.server_name = (
+            config.server_name.strip() or socket.gethostname().strip() or "unknown"
+        )
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(10.0, connect=10.0, read=10.0, write=10.0, pool=10.0)
@@ -62,20 +66,20 @@ class BotReporter:
         return result if isinstance(result, dict) else {"value": result}
 
     @staticmethod
-    def _split_text(text: str) -> list[str]:
-        if len(text) <= REPORT_TEXT_LIMIT:
+    def _split_text(text: str, limit: int = REPORT_TEXT_LIMIT) -> list[str]:
+        if len(text) <= limit:
             return [text]
         chunks: list[str] = []
         remaining = text
         while remaining:
-            if len(remaining) <= REPORT_TEXT_LIMIT:
+            if len(remaining) <= limit:
                 chunks.append(remaining)
                 break
-            split_at = remaining.rfind("\n\n", 0, REPORT_TEXT_LIMIT)
+            split_at = remaining.rfind("\n\n", 0, limit)
             if split_at < 1:
-                split_at = remaining.rfind("\n", 0, REPORT_TEXT_LIMIT)
+                split_at = remaining.rfind("\n", 0, limit)
             if split_at < 1:
-                split_at = REPORT_TEXT_LIMIT
+                split_at = limit
             chunks.append(remaining[:split_at].rstrip())
             remaining = remaining[split_at:].lstrip()
         return chunks
@@ -107,7 +111,11 @@ class BotReporter:
 
     async def send(self, text: str, *, strict: bool = False) -> bool:
         delivered = True
-        chunks = self._split_text(text)
+        header = f"服务器：{self.server_name}\n"
+        chunks = [
+            f"{header}{chunk}"
+            for chunk in self._split_text(text, REPORT_TEXT_LIMIT - len(header))
+        ]
         for chat_id in self.config.chat_ids:
             for chunk in chunks:
                 if not await self._send_chunk(chat_id, chunk, strict=strict):

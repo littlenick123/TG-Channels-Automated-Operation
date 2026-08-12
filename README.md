@@ -337,11 +337,20 @@ daily_time = "00:01"
 
 ```toml
 [reporting]
+server_name = "德国-G12"
 chat_ids = [
   123456789,
   987654321,
 ]
 ```
+
+#### `server_name`
+
+- 当前部署服务器的显示名称，例如 `德国-G12`、`香港-VPS-01` 或 `测试服务器`。
+- 支持中文、Emoji、空格和常用标点，只能配置一行，最多 100 个字符。
+- 每一条机器人通知的第一行都会显示 `服务器：德国-G12`，包括 `doctor` 测试、即时告警、最终汇总以及被拆分的长报告。
+- 未配置时程序会回退到系统主机名，以兼容旧配置；Docker 容器中的自动主机名可能是容器 ID，因此生产环境建议显式配置。
+- 修改该值只影响报告显示，不影响频道组数据库、Telegram Session 或任务状态。
 
 #### `chat_ids`
 
@@ -489,6 +498,7 @@ retry_delays_seconds = [30, 120, 360]
 ```toml
 [[channel_groups]]
 name = "channel_b"
+remark = "欧美中文字幕"
 source_channel = -1001234567890
 target_channel = -1009876543210
 daily_success_count = 4
@@ -497,6 +507,7 @@ daily_success_count = 4
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `name` | 是 | 频道组唯一名称，长度 1–64，只允许字母、数字、下划线和连字符，且首字符必须是字母或数字。 |
+| `remark` | 否 | 便于辨识频道组的单行中文备注，最多 100 个字符；机器人告警、最终汇总和命令行输出会显示该备注。 |
 | `source_channel` | 是 | 源频道数字 ID 或用户名。多个频道组可以使用同一个源频道。 |
 | `target_channel` | 是 | 目标频道数字 ID 或用户名。用户账号必须具有发帖权限。 |
 | `daily_success_count` | 是 | 当前频道组每天希望达到的成功发布数量，必须大于 0 且不能超过 `max_candidates_per_run`。 |
@@ -508,15 +519,31 @@ channel_b → ./data/channel_b.db
 channel_c → ./data/channel_c.db
 ```
 
+`name` 是稳定的内部标识，继续用于数据库文件名、数据库身份和 `--group channel_b` 参数，因此不能使用中文。`remark` 是显示名称，可以使用中文、Emoji、空格和常用标点。修改 `remark` 不会改变数据库路径，也不会丢失历史发布状态；不要仅为修改显示名称而修改已有组的 `name`。
+
+配置备注后的机器人汇总示例：
+
+```text
+[channel_b] 完成
+备注：欧美中文字幕
+成功：6/6
+本次尝试：6
+永久跳过：0
+可重试失败：0
+恢复确认：0
+```
+
 频道组的书写顺序就是运行顺序。以下配置一定先完成 `channel_b`，再开始 `channel_c`：
 
 ```toml
 [[channel_groups]]
 name = "channel_b"
+remark = "欧美中文字幕"
 # ...
 
 [[channel_groups]]
 name = "channel_c"
+remark = "欧美精选"
 # ...
 ```
 
@@ -550,6 +577,7 @@ timezone = "Asia/Shanghai"
 daily_time = "00:01"
 
 [reporting]
+server_name = "德国-G12"
 chat_ids = [123456789, 987654321]
 
 [processing]
@@ -577,30 +605,35 @@ retry_delays_seconds = [30, 120, 360]
 
 [[channel_groups]]
 name = "channel_b"
+remark = "欧美中文字幕"
 source_channel = -1001111111111
 target_channel = -1002222222222
 daily_success_count = 4
 
 [[channel_groups]]
 name = "channel_c"
+remark = "欧美精选"
 source_channel = -1001111111111
 target_channel = -1003333333333
 daily_success_count = 4
 
 [[channel_groups]]
 name = "channel_d"
+remark = "欧美剧情"
 source_channel = -1001111111111
 target_channel = -1004444444444
 daily_success_count = 3
 
 [[channel_groups]]
 name = "channel_e"
+remark = "高清精选"
 source_channel = -1001111111111
 target_channel = -1005555555555
 daily_success_count = 2
 
 [[channel_groups]]
 name = "channel_f"
+remark = "备用频道"
 source_channel = -1001111111111
 target_channel = -1006666666666
 daily_success_count = 1

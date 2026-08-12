@@ -119,13 +119,16 @@ class FakeMedia:
 
 def two_group_config(app_config):
     config = app_config(daily_success_count=1, max_candidates_per_run=2)
-    first = replace(config.channel_groups[0], name="channel_b")
+    first = replace(
+        config.channel_groups[0], name="channel_b", remark="欧美中文字幕"
+    )
     second = ChannelGroupConfig(
         name="channel_c",
         source_channel=first.source_channel,
         target_channel=-100333,
         database_path=first.database_path.with_name("channel_c.db"),
         daily_success_count=1,
+        remark="欧美精选",
     )
     return replace(config, channel_groups=(first, second))
 
@@ -176,6 +179,8 @@ async def test_runner_processes_groups_strictly_in_configuration_order(app_confi
         "send:channel_c",
     ]
     assert "所有频道组总耗时：1小时2分钟3秒" in reporter.messages[-1]
+    assert "[channel_b] 完成\n备注：欧美中文字幕" in reporter.messages[-1]
+    assert "[channel_c] 完成\n备注：欧美精选" in reporter.messages[-1]
     for group in config.channel_groups:
         database = StateDatabase(group.database_path)
         assert database.published_count(str(group.source_channel), results[0].summary.run_date) == 1
@@ -201,7 +206,9 @@ async def test_unavailable_group_is_reported_skipped_and_recovers_next_run(app_c
     assert "scan:channel_b" not in events
     assert "send:channel_c" in events
     assert any(
-        "频道组已跳过" in message and "channel_b" in message
+        "频道组已跳过" in message
+        and "组名：channel_b" in message
+        and "备注：欧美中文字幕" in message
         for message in reporter.messages
     )
     assert "channel_b" in reporter.messages[-1]

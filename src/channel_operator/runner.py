@@ -63,9 +63,11 @@ class MultiChannelRunner:
         published: int,
     ) -> None:
         remaining = max(0, group.daily_success_count - published)
+        remark_line = f"备注：{group.remark}\n" if group.remark else ""
         await self.reporter.send(
             "⚠️ 频道组已跳过\n"
             f"组名：{group.name}\n"
+            f"{remark_line}"
             f"源频道：{group.source_channel}\n"
             f"目标频道：{group.target_channel}\n"
             f"错误：{reason}\n"
@@ -79,7 +81,7 @@ class MultiChannelRunner:
         started_at = self.clock()
         results: list[GroupRunResult] = []
         for group in groups:
-            LOGGER.info("开始处理频道组 %s", group.name)
+            LOGGER.info("开始处理频道组 %s", group.display_name)
             database: StateDatabase | None = None
             published = 0
             try:
@@ -100,13 +102,13 @@ class MultiChannelRunner:
                 results.append(GroupRunResult(group=group, summary=summary))
                 LOGGER.info(
                     "频道组 %s 完成：成功 %s/%s",
-                    group.name,
+                    group.display_name,
                     summary.published,
                     group.daily_success_count,
                 )
             except Exception as exc:
                 reason = f"{type(exc).__name__}: {exc}"
-                LOGGER.exception("频道组 %s 失败，已跳过", group.name)
+                LOGGER.exception("频道组 %s 失败，已跳过", group.display_name)
                 if database is not None:
                     try:
                         run_date = datetime.now(self.config.timezone).date().isoformat()
@@ -114,7 +116,9 @@ class MultiChannelRunner:
                             str(group.source_channel), run_date
                         )
                     except Exception:
-                        LOGGER.exception("读取频道组 %s 的完成数量失败", group.name)
+                        LOGGER.exception(
+                            "读取频道组 %s 的完成数量失败", group.display_name
+                        )
                 results.append(
                     GroupRunResult(
                         group=group,
@@ -159,9 +163,11 @@ class MultiChannelRunner:
         ]
         for result in results:
             group = result.group
+            remark_line = f"备注：{group.remark}\n" if group.remark else ""
             if result.summary is None:
                 blocks.append(
                     f"[{group.name}] 已跳过\n"
+                    f"{remark_line}"
                     f"成功：{result.published}/{group.daily_success_count}\n"
                     f"原因：{result.skipped_reason or '未知错误'}"
                 )
@@ -169,6 +175,7 @@ class MultiChannelRunner:
             summary: RunSummary = result.summary
             blocks.append(
                 f"[{group.name}] {'完成' if result.succeeded else '未达目标'}\n"
+                f"{remark_line}"
                 f"成功：{summary.published}/{group.daily_success_count}\n"
                 f"本次尝试：{summary.attempted}\n"
                 f"永久跳过：{summary.rejected}\n"

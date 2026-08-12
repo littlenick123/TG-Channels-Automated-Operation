@@ -73,10 +73,12 @@ def _database(group: ChannelGroupConfig) -> StateDatabase:
 async def _report_group_error(
     reporter: BotReporter, group: ChannelGroupConfig, operation: str, exc: Exception
 ) -> None:
+    remark_line = f"备注：{group.remark}\n" if group.remark else ""
     await reporter.send(
         "⚠️ 频道组操作失败，已继续后续组\n"
         f"操作：{operation}\n"
         f"组名：{group.name}\n"
+        f"{remark_line}"
         f"源频道：{group.source_channel}\n"
         f"目标频道：{group.target_channel}\n"
         f"错误：{type(exc).__name__}: {exc}"
@@ -135,20 +137,24 @@ async def _run(arguments: argparse.Namespace) -> int:
             )
             bot_username = await reporter.doctor()
             print(f"report_bot: @{bot_username}")
+            print(f"report_server: {reporter.server_name}")
             failed = False
             for group in groups:
                 database: StateDatabase | None = None
                 try:
                     database = _database(group)
                     checks = await telegram.for_group(group).doctor()
-                    print(f"\n[{group.name}]")
+                    print(f"\n[{group.display_name}]")
                     for name, value in checks.items():
                         print(f"{name}: {value}")
                     print(f"database: {group.database_path}")
                 except Exception as exc:
                     failed = True
-                    logging.exception("频道组 %s 检查失败", group.name)
-                    print(f"\n[{group.name}] ERROR: {type(exc).__name__}: {exc}")
+                    logging.exception("频道组 %s 检查失败", group.display_name)
+                    print(
+                        f"\n[{group.display_name}] ERROR: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                     await _report_group_error(reporter, group, "doctor", exc)
                 finally:
                     if database is not None:
@@ -172,10 +178,12 @@ async def _run(arguments: argparse.Namespace) -> int:
                             reporter,
                         )
                         count = await service.index()
-                        print(f"[{group.name}] 索引完成，共 {count} 个媒体组")
+                        print(
+                            f"[{group.display_name}] 索引完成，共 {count} 个媒体组"
+                        )
                     except Exception as exc:
                         failed = True
-                        logging.exception("频道组 %s 索引失败", group.name)
+                        logging.exception("频道组 %s 索引失败", group.display_name)
                         await _report_group_error(reporter, group, "index", exc)
                     finally:
                         if database is not None:
@@ -196,14 +204,14 @@ async def _run(arguments: argparse.Namespace) -> int:
                             reporter,
                         )
                         previews = await service.dry_run()
-                        print(f"\n[{group.name}]")
+                        print(f"\n[{group.display_name}]")
                         if not previews:
                             print("没有符合条件的未处理媒体组")
                         for grouped_id, caption in previews:
                             print(f"\n媒体组 {grouped_id}\n{caption or '[空文案]'}")
                     except Exception as exc:
                         failed = True
-                        logging.exception("频道组 %s 预览失败", group.name)
+                        logging.exception("频道组 %s 预览失败", group.display_name)
                         await _report_group_error(reporter, group, "dry-run", exc)
                     finally:
                         if database is not None:
@@ -214,7 +222,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             for result in results:
                 status = "已跳过" if result.skipped_reason else "完成"
                 print(
-                    f"[{result.group.name}] {status}：成功 {result.published}/"
+                    f"[{result.group.display_name}] {status}：成功 {result.published}/"
                     f"{result.group.daily_success_count}"
                 )
             return 0 if all(result.succeeded for result in results) else 2

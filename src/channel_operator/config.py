@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import tomllib
 import unicodedata
 from dataclasses import dataclass
@@ -63,12 +64,18 @@ class ChannelGroupConfig:
     target_channel: str | int
     database_path: Path
     daily_success_count: int
+    remark: str = ""
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.name}（{self.remark}）" if self.remark else self.name
 
 
 @dataclass(frozen=True, slots=True)
 class ReportingConfig:
     bot_token: str
     chat_ids: tuple[int, ...]
+    server_name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +193,14 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             )
         if name in names:
             raise ConfigError(f"频道组名称不能重复：{name}")
+        remark_raw = raw_group.get("remark", "")
+        if not isinstance(remark_raw, str):
+            raise ConfigError(f"频道组 {name} 的 remark 必须是字符串")
+        remark = remark_raw.strip()
+        if "\n" in remark or "\r" in remark:
+            raise ConfigError(f"频道组 {name} 的 remark 必须是单行文本")
+        if len(remark) > 100:
+            raise ConfigError(f"频道组 {name} 的 remark 不能超过 100 个字符")
         if "database_path" in raw_group:
             raise ConfigError(
                 f"频道组 {name} 不再使用 database_path；"
@@ -206,6 +221,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
                 target_channel=target_channel,
                 database_path=database_path,
                 daily_success_count=daily_success_count,
+                remark=remark,
             )
         )
 
@@ -232,6 +248,19 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("私人会话 reporting.chat_ids 必须全部是正整数")
     if len(set(report_chat_ids)) != len(report_chat_ids):
         raise ConfigError("reporting.chat_ids 不能包含重复值")
+    server_name_raw = reporting.get("server_name")
+    if server_name_raw is None:
+        report_server_name = socket.gethostname().strip() or "unknown"
+    else:
+        if not isinstance(server_name_raw, str):
+            raise ConfigError("reporting.server_name 必须是字符串")
+        report_server_name = server_name_raw.strip()
+        if not report_server_name:
+            raise ConfigError("reporting.server_name 不能为空")
+        if "\n" in report_server_name or "\r" in report_server_name:
+            raise ConfigError("reporting.server_name 必须是单行文本")
+        if len(report_server_name) > 100:
+            raise ConfigError("reporting.server_name 不能超过 100 个字符")
 
     config = AppConfig(
         api_id=api_id,
@@ -239,7 +268,11 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         phone=os.getenv("TG_PHONE") or None,
         session_path=_resolve_path(base, os.getenv("TG_SESSION_PATH", "./data/telegram-user")),
         channel_groups=tuple(channel_groups),
-        reporting=ReportingConfig(report_bot_token, report_chat_ids),
+        reporting=ReportingConfig(
+            report_bot_token,
+            report_chat_ids,
+            report_server_name,
+        ),
         keep_tags=keep_tags,
         drop_tags=drop_tags,
         caption_limit=int(content.get("caption_limit", 1024)),

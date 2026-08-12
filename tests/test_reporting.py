@@ -21,7 +21,8 @@ async def test_reporter_doctor_checks_bot_and_sends_private_message():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         reporter = BotReporter(
-            ReportingConfig("123:test", (987654321, 123456789)), client=client
+            ReportingConfig("123:test", (987654321, 123456789), "德国-G12"),
+            client=client,
         )
         username = await reporter.doctor()
 
@@ -29,6 +30,7 @@ async def test_reporter_doctor_checks_bot_and_sends_private_message():
     assert calls[0][0].endswith("/getMe")
     assert calls[1][0].endswith("/sendMessage")
     assert calls[1][1]["chat_id"] == 987654321
+    assert calls[1][1]["text"].startswith("服务器：德国-G12\n")
     assert calls[2][0].endswith("/sendMessage")
     assert calls[2][1]["chat_id"] == 123456789
 
@@ -51,7 +53,7 @@ async def test_reporter_failure_is_non_blocking_by_default(monkeypatch):
     monkeypatch.setattr("channel_operator.reporting.asyncio.sleep", no_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         reporter = BotReporter(
-            ReportingConfig("bad-token", (987654321,)), client=client
+            ReportingConfig("bad-token", (987654321,), "测试服务器"), client=client
         )
         assert await reporter.send("test") is False
         with pytest.raises(ReporterError, match="Unauthorized"):
@@ -79,7 +81,9 @@ async def test_one_recipient_failure_does_not_block_later_recipients(monkeypatch
 
     monkeypatch.setattr("channel_operator.reporting.asyncio.sleep", no_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        reporter = BotReporter(ReportingConfig("123:test", (111, 222)), client=client)
+        reporter = BotReporter(
+            ReportingConfig("123:test", (111, 222), "测试服务器"), client=client
+        )
         assert await reporter.send("test") is False
 
     assert attempted_chat_ids == [111, 111, 111, 222]
@@ -95,11 +99,14 @@ async def test_reporter_splits_long_reports():
 
     text = "A" * 3900 + "\n\n" + "B" * 3900
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        reporter = BotReporter(ReportingConfig("123:test", (987654321,)), client=client)
+        reporter = BotReporter(
+            ReportingConfig("123:test", (987654321,), "德国-G12"), client=client
+        )
         assert await reporter.send(text) is True
 
     assert len(messages) == 2
     assert all(len(message) <= 4000 for message in messages)
+    assert all(message.startswith("服务器：德国-G12\n") for message in messages)
 
 
 @pytest.mark.asyncio
@@ -114,7 +121,9 @@ async def test_reporter_timeout_does_not_expose_token_or_raise(monkeypatch, capl
 
     monkeypatch.setattr("channel_operator.reporting.asyncio.sleep", no_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        reporter = BotReporter(ReportingConfig(token, (987654321,)), client=client)
+        reporter = BotReporter(
+            ReportingConfig(token, (987654321,), "测试服务器"), client=client
+        )
         assert await reporter.send("test") is False
 
     assert token not in caplog.text
