@@ -13,9 +13,9 @@ intro_footer = ""
 [schedule]
 # daily 每日定时运行；continuous 按频道组顺序循环
 mode = "daily"
-# 任务日期、定时和日报使用的 IANA 时区
+# 任务日期、定时和汇总时间使用的 IANA 时区
 timezone = "Asia/Shanghai"
-# daily 为启动时间；continuous 为上一自然日日报时间
+# daily 模式的每日启动时间；continuous 模式忽略此项
 daily_time = "00:01"
 # continuous 整轮零成功时等待秒数
 continuous_idle_seconds = 300
@@ -53,7 +53,7 @@ disk_reserve_bytes = 1073741824
 
 # 数据目录、运行限制、下载并发和重试参数
 [runtime]
-# 频道组 SQLite 数据库和日报持久状态目录
+# 频道组 SQLite 数据库和持久状态目录
 database_dir = "./data"
 # 下载、转码、截图和进程锁的临时工作目录
 work_dir = "./work"

@@ -76,31 +76,20 @@ async def run_scheduler(
 async def run_continuous_scheduler(
     config: AppConfig,
     run_cycle: Callable[[], Awaitable[int]],
-    report_due: Callable[[datetime], Awaitable[None]],
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    now: Callable[[], datetime] | None = None,
     max_cycles: int | None = None,
 ) -> int:
     """Run channel groups in strict cycles until the process is stopped."""
-    now_factory = now or (lambda: datetime.now(config.timezone))
     completed_cycles = 0
 
-    async def safely_report_due() -> None:
-        try:
-            await report_due(now_factory())
-        except Exception:
-            LOGGER.exception("检查或发送连续模式日报失败；下一轮将重试")
-
     while max_cycles is None or completed_cycles < max_cycles:
-        await safely_report_due()
         try:
             published = await run_cycle()
         except Exception:
             LOGGER.exception("本轮循环发生未处理异常；等待后继续下一轮")
             published = 0
         completed_cycles += 1
-        await safely_report_due()
         if published > 0:
             LOGGER.info("本轮成功发布 %s 组，立即开始下一轮", published)
             continue

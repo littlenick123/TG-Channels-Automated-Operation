@@ -88,7 +88,6 @@ async def test_continuous_scheduler_starts_immediately_and_only_idles_empty_cycl
     config = app_config(schedule_mode="continuous", continuous_idle_seconds=300)
     published = iter((2, 0, 1))
     cycles = []
-    reports = []
     delays = []
 
     async def run_cycle():
@@ -96,25 +95,19 @@ async def test_continuous_scheduler_starts_immediately_and_only_idles_empty_cycl
         cycles.append(value)
         return value
 
-    async def report_due(now):
-        reports.append(now)
-
     async def sleep(delay):
         delays.append(delay)
 
     code = await run_continuous_scheduler(
         config,
         run_cycle,
-        report_due,
         sleep=sleep,
-        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=TIMEZONE),
         max_cycles=3,
     )
 
     assert code == 0
     assert cycles == [2, 0, 1]
     assert delays == [300]
-    assert len(reports) == 6
 
 
 @pytest.mark.asyncio
@@ -125,18 +118,13 @@ async def test_continuous_scheduler_survives_cycle_exception_and_idles(app_confi
     async def failing_cycle():
         raise RuntimeError("temporary")
 
-    async def report_due(now):
-        return None
-
     async def sleep(delay):
         delays.append(delay)
 
     code = await run_continuous_scheduler(
         config,
         failing_cycle,
-        report_due,
         sleep=sleep,
-        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=TIMEZONE),
         max_cycles=2,
     )
 

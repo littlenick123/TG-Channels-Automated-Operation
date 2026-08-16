@@ -304,81 +304,74 @@ async def test_continuous_mode_does_not_pause_temporary_group_error(app_config):
 
 
 @pytest.mark.asyncio
-async def test_continuous_daily_report_is_persistent_and_not_duplicated(app_config):
+async def test_continuous_cycle_sends_one_summary_after_all_groups(app_config):
     config = two_group_config(app_config)
+    events = []
     reporter = FakeReporter()
+    clock_values = iter((100.0, 3_823.0))
+    completed_at = datetime(2026, 8, 12, 8, 9, 10, tzinfo=config.timezone)
     runner = MultiChannelRunner(
         config,
-        GatewayFactory([]),
-        FakeMedia(config, []),
+        GatewayFactory(events),
+        FakeMedia(config, events),
         reporter,
+        clock=lambda: next(clock_values),
+        now=lambda: completed_at,
     )
 
-    initialized = await runner.send_due_continuous_reports(
+    results = await runner.run_once(
         config.channel_groups,
-        now=datetime(2026, 8, 12, 0, 1, tzinfo=config.timezone),
-    )
-    for index, group in enumerate(config.channel_groups, start=1):
-        database = StateDatabase(group.database_path)
-        database.record_daily_stats(
-            "2026-08-12",
-            published=index,
-            attempted=index + 1,
-            paused_reason="频道被封" if index == 1 else None,
-        )
-        database.close()
-
-    sent = await runner.send_due_continuous_reports(
-        config.channel_groups,
-        now=datetime(2026, 8, 13, 0, 1, tzinfo=config.timezone),
-    )
-    repeated = await runner.send_due_continuous_reports(
-        config.channel_groups,
-        now=datetime(2026, 8, 13, 12, 0, tzinfo=config.timezone),
+        continuous=True,
     )
 
-    assert initialized == 0
-    assert sent == 1
-    assert repeated == 0
+    assert all(result.succeeded for result in results)
     assert len(reporter.messages) == 1
-    assert "连续运营日报 2026-08-12" in reporter.messages[0]
-    assert "备注：欧美中文字幕" in reporter.messages[0]
-    assert "暂停原因：频道被封" in reporter.messages[0]
+    message = reporter.messages[0]
+    assert "Telegram 多频道连续运营本轮汇总" in message
+    assert "本轮结束：2026-08-12 08:09:10+08:00" in message
+    assert "所有频道组总耗时：1小时2分钟3秒" in message
+    assert "[channel_b] 完成\n备注：欧美中文字幕" in message
+    assert "[channel_c] 完成\n备注：欧美精选" in message
+    assert events.index("send:channel_b") < events.index("doctor:channel_c")
 
 
 @pytest.mark.asyncio
-async def test_continuous_report_isolates_broken_group_database(app_config):
+async def test_continuous_zero_success_cycle_still_sends_summary(app_config):
     config = two_group_config(app_config)
-    first, second = config.channel_groups
-    first.database_path.parent.mkdir(parents=True, exist_ok=True)
-    first.database_path.write_bytes(b"not a sqlite database")
     reporter = FakeReporter()
+    clock_values = iter((10.0, 20.0))
+    paused_groups = {
+        config.channel_groups[0].name: "ChannelGroupUnavailable: 频道被封",
+        config.channel_groups[1].name: "DatabaseError: 数据库损坏",
+    }
     runner = MultiChannelRunner(
         config,
         GatewayFactory([]),
         FakeMedia(config, []),
         reporter,
+        clock=lambda: next(clock_values),
+        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=config.timezone),
     )
-    healthy = StateDatabase(second.database_path)
-    healthy.continuous_report_cursor("2026-08-11")
-    healthy.record_daily_stats("2026-08-12", published=1, attempted=1)
-    healthy.close()
 
-    sent = await runner.send_due_continuous_reports(
+    results = await runner.run_once(
         config.channel_groups,
-        now=datetime(2026, 8, 13, 0, 1, tzinfo=config.timezone),
-        paused_groups={first.name: "DatabaseError: 数据库损坏"},
+        continuous=True,
+        paused_groups=paused_groups,
     )
 
-    assert sent == 1
-    assert "[channel_b]" in reporter.messages[0]
-    assert "暂停原因：DatabaseError: 数据库损坏" in reporter.messages[0]
-    assert "[channel_c]" in reporter.messages[0]
-    assert "成功：1" in reporter.messages[0]
+    assert sum(result.published for result in results) == 0
+    assert len(reporter.messages) == 1
+    message = reporter.messages[0]
+    assert "[channel_b] 已跳过" in message
+    assert "成功：0/1\n本次尝试：0" in message
+    assert "永久跳过：0\n可重试失败：0\n恢复确认：0" in message
+    assert "原因：ChannelGroupUnavailable: 频道被封" in message
+    assert "[channel_c] 已跳过" in message
+    assert "原因：DatabaseError: 数据库损坏" in message
 
 
 @pytest.mark.asyncio
-async def test_failed_continuous_report_keeps_cursor_and_waits_before_retry(app_config):
+async def test_failed_continuous_cycle_report_does_not_fail_or_repeat_cycle(app_config):
     config = two_group_config(app_config)
 
     class FailingReporter(FakeReporter):
@@ -393,26 +386,13 @@ async def test_failed_continuous_report_keeps_cursor_and_waits_before_retry(app_
         FakeMedia(config, []),
         reporter,
         clock=lambda: 100.0,
-    )
-    for group in config.channel_groups:
-        database = StateDatabase(group.database_path)
-        database.continuous_report_cursor("2026-08-11")
-        database.record_daily_stats("2026-08-12", published=1)
-        database.close()
-
-    first = await runner.send_due_continuous_reports(
-        config.channel_groups,
-        now=datetime(2026, 8, 13, 0, 1, tzinfo=config.timezone),
-    )
-    second = await runner.send_due_continuous_reports(
-        config.channel_groups,
-        now=datetime(2026, 8, 13, 0, 10, tzinfo=config.timezone),
+        now=lambda: datetime(2026, 8, 12, 8, 0, tzinfo=config.timezone),
     )
 
-    assert first == 0
-    assert second == 0
+    results = await runner.run_once(
+        config.channel_groups,
+        continuous=True,
+    )
+
+    assert all(result.succeeded for result in results)
     assert len(reporter.messages) == 1
-    for group in config.channel_groups:
-        database = StateDatabase(group.database_path)
-        assert database.continuous_report_cursor("2026-01-01") == "2026-08-11"
-        database.close()

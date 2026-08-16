@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-from datetime import datetime
 
 from .config import AppConfig, ChannelGroupConfig, ConfigError, load_config
 from .database import StateDatabase
@@ -97,18 +96,11 @@ async def _run_continuous(config: AppConfig) -> int:
         runner = MultiChannelRunner(config, telegram, media, reporter)
 
         async def run_cycle() -> int:
-            async def safe_point() -> None:
-                try:
-                    await report_due(datetime.now(config.timezone))
-                except Exception:
-                    logging.exception("媒体处理安全点检查连续模式日报失败")
-
             results = await runner.run_once(
                 config.channel_groups,
                 continuous=True,
-                send_summary=False,
+                send_summary=True,
                 paused_groups=paused_groups,
-                safe_point=safe_point,
             )
             return sum(
                 result.summary.published
@@ -116,19 +108,11 @@ async def _run_continuous(config: AppConfig) -> int:
                 if result.summary is not None
             )
 
-        async def report_due(now) -> None:
-            await runner.send_due_continuous_reports(
-                config.channel_groups,
-                now=now,
-                paused_groups=paused_groups,
-            )
-
         lock_path = config.work_dir / ".channel-operator.lock"
         with ProcessLock(lock_path):
             return await run_continuous_scheduler(
                 config,
                 run_cycle,
-                report_due,
             )
     finally:
         await reporter.close()
@@ -280,7 +264,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             results = await runner.run_once(
                 groups,
                 continuous=continuous,
-                send_summary=not continuous,
+                send_summary=True,
             )
             for result in results:
                 status = "已跳过" if result.skipped_reason else "完成"
