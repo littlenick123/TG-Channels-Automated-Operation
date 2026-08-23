@@ -43,6 +43,11 @@ class AutomationService:
         self.media = media
         self.reporter = reporter
         self.source_key = str(group.source_channel)
+        self.intro_footer = (
+            config.intro_footer
+            if group.intro_footer is None
+            else group.intro_footer
+        )
 
     async def index(self) -> int:
         checkpoint = self.database.checkpoint(self.source_key)
@@ -90,7 +95,7 @@ class AutomationService:
                 candidate.caption,
                 self.config.keep_tags,
                 self.config.drop_tags,
-                intro_footer=self.config.intro_footer,
+                intro_footer=self.intro_footer,
                 limit=self.config.caption_limit,
             )
             if not caption.plain.strip():
@@ -264,7 +269,7 @@ class AutomationService:
                 group.caption,
                 self.config.keep_tags,
                 self.config.drop_tags,
-                intro_footer=self.config.intro_footer,
+                intro_footer=self.intro_footer,
                 limit=self.config.caption_limit,
             )
             if not caption.plain.strip():

@@ -57,6 +57,15 @@ def _resolve_path(base: Path, raw: str) -> Path:
     return path if path.is_absolute() else (base / path).resolve()
 
 
+def _parse_intro_footer(raw: Any, field_name: str) -> str:
+    if not isinstance(raw, str):
+        raise ConfigError(f"{field_name} 必须是字符串")
+    value = raw.strip()
+    if "\n" in value or "\r" in value:
+        raise ConfigError(f"{field_name} 必须是单行文本")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelGroupConfig:
     name: str
@@ -65,6 +74,7 @@ class ChannelGroupConfig:
     database_path: Path
     daily_success_count: int
     remark: str = ""
+    intro_footer: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -154,12 +164,9 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     overlap = keep_keys & drop_keys
     if overlap:
         raise ConfigError(f"keep_tags 与 drop_tags 不能重叠：{', '.join(sorted(overlap))}")
-    intro_footer_raw = content.get("intro_footer", "")
-    if not isinstance(intro_footer_raw, str):
-        raise ConfigError("content.intro_footer 必须是字符串")
-    intro_footer = intro_footer_raw.strip()
-    if "\n" in intro_footer or "\r" in intro_footer:
-        raise ConfigError("content.intro_footer 必须是单行文本")
+    intro_footer = _parse_intro_footer(
+        content.get("intro_footer", ""), "content.intro_footer"
+    )
 
     daily_time = str(schedule.get("daily_time", "00:01"))
     if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", daily_time):
@@ -214,6 +221,13 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             raise ConfigError(f"频道组 {name} 的 remark 必须是单行文本")
         if len(remark) > 100:
             raise ConfigError(f"频道组 {name} 的 remark 不能超过 100 个字符")
+        group_intro_footer = (
+            _parse_intro_footer(
+                raw_group["intro_footer"], f"频道组 {name} 的 intro_footer"
+            )
+            if "intro_footer" in raw_group
+            else None
+        )
         if "database_path" in raw_group:
             raise ConfigError(
                 f"频道组 {name} 不再使用 database_path；"
@@ -240,6 +254,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
                 database_path=database_path,
                 daily_success_count=daily_success_count,
                 remark=remark,
+                intro_footer=group_intro_footer,
             )
         )
 

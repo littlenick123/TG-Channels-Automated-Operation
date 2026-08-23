@@ -44,6 +44,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.continuous_idle_seconds == 300
     assert [group.name for group in config.channel_groups] == ["channel_b"]
     assert config.channel_groups[0].remark == "欧美中文字幕"
+    assert config.channel_groups[0].intro_footer is None
     assert config.channel_groups[0].display_name == "channel_b（欧美中文字幕）"
     assert config.database_dir == (tmp_path / "data").resolve()
     assert config.channel_groups[0].database_path == (
@@ -137,6 +138,53 @@ def test_intro_footer_must_be_one_line(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
 
     with pytest.raises(ConfigError, match="intro_footer 必须是单行文本"):
+        load_config(path)
+
+
+def test_channel_group_intro_footer_is_loaded_and_trimmed(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'remark = "欧美中文字幕"',
+            'remark = "欧美中文字幕"\nintro_footer = "  频道专属内容  "',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    assert load_config(path).channel_groups[0].intro_footer == "频道专属内容"
+
+
+@pytest.mark.parametrize(
+    ("footer_value", "message"),
+    [
+        ('"第一行\\n第二行"', "必须是单行文本"),
+        ("123", "必须是字符串"),
+    ],
+)
+def test_channel_group_intro_footer_is_validated(
+    footer_value: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            'remark = "欧美中文字幕"',
+            f'remark = "欧美中文字幕"\nintro_footer = {footer_value}',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
         load_config(path)
 
 

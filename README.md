@@ -256,7 +256,7 @@ TZ=Asia/Shanghai
 keep_tags = ["#必留标签", "#中文字幕", "#欧美精选"]
 drop_tags = ["#广告", "#删除标签"]
 caption_limit = 1024
-intro_footer = "点击频道名称查看更多内容"
+intro_footer = ""
 ```
 
 #### `keep_tags`
@@ -281,12 +281,30 @@ intro_footer = "点击频道名称查看更多内容"
 
 #### `intro_footer`
 
-- 可选的单行固定文字，默认空字符串表示关闭，例如 `intro_footer = "点击频道名称查看更多内容"`。
+- `[content].intro_footer` 是全部频道组的可选默认值，空字符串表示默认关闭。
+- 每个 `[[channel_groups]]` 可以单独配置同名字段：未配置时继承全局值，填写文字时覆盖全局值，显式设置 `intro_footer = ""` 时只关闭该频道组的追加内容。
 - 源文案存在简介时，这段文字会在简介末尾另起一行并加粗，且与原简介一起放在可折叠引用中。
 - 源文案没有简介时，这段文字会单独成为简介，以加粗、可折叠引用格式发送。
 - 内容中的 `<`、`>`、`&` 等字符会自动进行 HTML 转义，不需要手动添加 `<b>` 标签。
 - 超出 `caption_limit` 时优先缩短原简介并添加 `...`，尽量完整保留固定文字；固定文字本身过长时也会安全截断并添加 `...`。
-- 只允许配置一行文字；若不需要追加内容，请设置为 `intro_footer = ""`。
+- 全局和频道组的值都只允许一行文字。
+
+例如全局关闭，只给 `channel_b` 添加固定文字：
+
+```toml
+[content]
+intro_footer = ""
+
+[[channel_groups]]
+name = "channel_b"
+intro_footer = "点击频道名称查看更多内容"
+# 其余频道组字段略
+
+[[channel_groups]]
+name = "channel_c"
+intro_footer = ""
+# 其余频道组字段略
+```
 
 源文案支持以下标签行：
 
@@ -517,6 +535,7 @@ retry_delays_seconds = [30, 120, 360]
 [[channel_groups]]
 name = "channel_b"
 remark = "欧美中文字幕"
+intro_footer = "点击频道名称查看更多内容"
 source_channel = -1001234567890
 target_channel = -1009876543210
 daily_success_count = 4
@@ -526,6 +545,7 @@ daily_success_count = 4
 |---|---|---|
 | `name` | 是 | 频道组唯一名称，长度 1–64，只允许字母、数字、下划线和连字符，且首字符必须是字母或数字。 |
 | `remark` | 否 | 便于辨识频道组的单行中文备注，最多 100 个字符；机器人告警、最终汇总和命令行输出会显示该备注。 |
+| `intro_footer` | 否 | 本频道组的单行追加文字。未配置时继承 `[content].intro_footer`；填写文字时覆盖全局值；设置为空字符串时关闭本组追加内容。 |
 | `source_channel` | 是 | 源频道数字 ID 或用户名。多个频道组可以使用同一个源频道。 |
 | `target_channel` | 是 | 目标频道数字 ID 或用户名。用户账号必须具有发帖权限。 |
 | `daily_success_count` | 是 | daily 模式为当天累计目标；continuous 模式为每次轮到该组时的本轮目标。必须大于 0 且不能超过 `max_candidates_per_run`。 |
@@ -590,7 +610,7 @@ keep_tags = [
 ]
 drop_tags = ["#广告", "#旧标签"]
 caption_limit = 1024
-intro_footer = "点击频道名称查看更多内容"
+intro_footer = ""
 
 [schedule]
 mode = "daily"
@@ -628,6 +648,7 @@ retry_delays_seconds = [30, 120, 360]
 [[channel_groups]]
 name = "channel_b"
 remark = "欧美中文字幕"
+intro_footer = "点击频道名称查看更多内容"
 source_channel = -1001111111111
 target_channel = -1002222222222
 daily_success_count = 4
@@ -635,6 +656,7 @@ daily_success_count = 4
 [[channel_groups]]
 name = "channel_c"
 remark = "欧美精选"
+intro_footer = ""
 source_channel = -1001111111111
 target_channel = -1003333333333
 daily_success_count = 4

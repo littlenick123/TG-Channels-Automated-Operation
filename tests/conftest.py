@@ -61,6 +61,8 @@ def app_config(tmp_path: Path):
     )
 
     def factory(**changes):
+        unset = object()
+        group_intro_footer = changes.pop("group_intro_footer", unset)
         group_fields = {
             key: changes.pop(key)
             for key in (
@@ -73,6 +75,8 @@ def app_config(tmp_path: Path):
             )
             if key in changes
         }
+        if group_intro_footer is not unset:
+            group_fields["intro_footer"] = group_intro_footer
         selected_group = replace(group, **group_fields)
         return replace(config, channel_groups=(selected_group,), **changes)
 

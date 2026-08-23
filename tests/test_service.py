@@ -265,6 +265,55 @@ async def test_dry_run_filters_empty_caption_and_returns_replacement(app_config)
     database.close()
 
 
+@pytest.mark.parametrize(
+    ("global_footer", "group_footer", "expected_caption"),
+    [
+        ("全局默认内容", None, "#有效\n全局默认内容"),
+        ("全局默认内容", "频道专属内容", "#有效\n频道专属内容"),
+        ("全局默认内容", "", "#有效"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_channel_group_intro_footer_overrides_or_inherits_global_value(
+    app_config,
+    global_footer,
+    group_footer,
+    expected_caption,
+):
+    config = app_config(
+        daily_success_count=1,
+        intro_footer=global_footer,
+        group_intro_footer=group_footer,
+    )
+    group = config.channel_groups[0]
+    snapshot = MessageSnapshot(
+        message_id=1,
+        grouped_id=123,
+        caption="标签：#有效",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    database = StateDatabase(group.database_path)
+    service = AutomationService(
+        config,
+        group,
+        database,
+        FakeTelegram(snapshot),
+        FakeMedia(config),
+        FakeReporter(),
+    )
+
+    previews = await service.dry_run()
+
+    assert previews == [(123, expected_caption)]
+    database.close()
+
+
 @pytest.mark.asyncio
 async def test_channel_failure_aborts_group_and_keeps_media_retryable(app_config):
     config = app_config(daily_success_count=1)
