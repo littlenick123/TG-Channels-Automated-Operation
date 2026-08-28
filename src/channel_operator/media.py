@@ -92,8 +92,20 @@ class MediaProcessor:
                 f"源视频短边只有 {short_edge}px，低于 {self.config.minimum_source_short_edge}px"
             )
 
+    @staticmethod
+    def transcode_bounds(output_height: int, *, landscape: bool) -> tuple[int, int]:
+        long_edge = 2 * round(output_height * 8 / 9)
+        return (
+            (long_edge, output_height)
+            if landscape
+            else (output_height, long_edge)
+        )
+
     async def transcode(self, source: Path, destination: Path, info: VideoInfo) -> VideoInfo:
-        bounds = (1280, 720) if info.display_width >= info.display_height else (720, 1280)
+        bounds = self.transcode_bounds(
+            self.config.output_height,
+            landscape=info.display_width >= info.display_height,
+        )
         scale = (
             f"scale={bounds[0]}:{bounds[1]}:force_original_aspect_ratio=decrease:"
             "force_divisible_by=2,setsar=1"

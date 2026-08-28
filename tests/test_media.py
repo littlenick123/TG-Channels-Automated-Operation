@@ -15,9 +15,25 @@ def test_screenshot_time_rules():
     assert MediaProcessor.screenshot_times(100) == (15, 50, 85)
 
 
+def test_transcode_bounds_follow_configured_output_height():
+    assert MediaProcessor.transcode_bounds(720, landscape=True) == (1280, 720)
+    assert MediaProcessor.transcode_bounds(720, landscape=False) == (720, 1280)
+    assert MediaProcessor.transcode_bounds(480, landscape=True) == (854, 480)
+    assert MediaProcessor.transcode_bounds(480, landscape=False) == (480, 854)
+
+
+@pytest.mark.parametrize(
+    ("output_height", "expected_size"),
+    [(720, (1280, 720)), (480, (854, 480))],
+)
 @pytest.mark.asyncio
-async def test_transcode_and_extract_three_frames(app_config, tmp_path: Path):
-    config = app_config()
+async def test_transcode_and_extract_three_frames(
+    app_config,
+    tmp_path: Path,
+    output_height: int,
+    expected_size: tuple[int, int],
+):
+    config = app_config(output_height=output_height)
     processor = MediaProcessor(config)
     source = tmp_path / "source.mp4"
     process = await asyncio.create_subprocess_exec(
@@ -49,7 +65,7 @@ async def test_transcode_and_extract_three_frames(app_config, tmp_path: Path):
         output, output_info.duration, tmp_path / "video_thumb.jpg"
     )
 
-    assert (output_info.width, output_info.height) == (1280, 720)
+    assert (output_info.width, output_info.height) == expected_size
     assert len(frames) == 3
     assert all(frame.exists() and frame.stat().st_size > 0 for frame in frames)
     assert 0 < thumbnail.stat().st_size <= THUMBNAIL_MAX_BYTES

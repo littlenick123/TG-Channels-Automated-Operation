@@ -110,6 +110,7 @@ class AppConfig:
     crf: int
     preset: str
     audio_bitrate: str
+    output_height: int
     minimum_source_short_edge: int
     album_settle_seconds: int
     disk_reserve_bytes: int
@@ -186,6 +187,10 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         timezone = ZoneInfo(str(schedule.get("timezone", "Asia/Shanghai")))
     except Exception as exc:
         raise ConfigError("timezone 不是有效的 IANA 时区") from exc
+    try:
+        output_height = int(processing.get("output_height", 720))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("output_height 必须是整数") from exc
 
     raw_groups = data.get("channel_groups")
     if not isinstance(raw_groups, list) or not raw_groups:
@@ -320,6 +325,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         crf=int(processing.get("crf", 23)),
         preset=str(processing.get("preset", "medium")),
         audio_bitrate=str(processing.get("audio_bitrate", "128k")),
+        output_height=output_height,
         minimum_source_short_edge=int(processing.get("minimum_source_short_edge", 1080)),
         album_settle_seconds=int(processing.get("album_settle_seconds", 300)),
         disk_reserve_bytes=int(processing.get("disk_reserve_bytes", 1_073_741_824)),
@@ -358,6 +364,10 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("4C VPS 的 ffmpeg_threads 必须在 1 到 4 之间")
     if not 0 <= config.crf <= 51:
         raise ConfigError("CRF 必须在 0 到 51 之间")
+    if not 144 <= config.output_height <= 2_160:
+        raise ConfigError("output_height 必须在 144 到 2160 之间")
+    if config.output_height % 2:
+        raise ConfigError("output_height 必须是偶数")
     if not 1 <= config.caption_limit <= 1024:
         raise ConfigError("caption_limit 必须在 1 到 1024 之间")
     if not 1 <= config.download_concurrency <= 8:

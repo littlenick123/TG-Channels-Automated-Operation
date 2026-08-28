@@ -162,6 +162,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"schedule_mode: {config.schedule_mode}")
             print(f"daily_time: {config.daily_time}")
             print(f"continuous_idle_seconds: {config.continuous_idle_seconds}")
+            print(f"output_height: {config.output_height}")
             print(f"download_concurrency: {config.download_concurrency}")
             print(
                 "download_stall_timeout_seconds: "

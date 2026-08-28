@@ -44,6 +44,8 @@ crf = 27
 preset = "medium"
 # 输出 AAC 音频码率
 audio_bitrate = "128k"
+# 输出视频的目标短边高度；480 对应横屏约854×480、竖屏约480×854
+output_height = 480
 # 源视频短边最低像素，默认只处理1080P及以上
 minimum_source_short_edge = 1080
 # 新媒体组等待完整到达后才允许处理的秒数

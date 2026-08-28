@@ -45,6 +45,7 @@ def app_config(tmp_path: Path):
         crf=23,
         preset="ultrafast",
         audio_bitrate="128k",
+        output_height=720,
         minimum_source_short_edge=1080,
         album_settle_seconds=0,
         disk_reserve_bytes=0,

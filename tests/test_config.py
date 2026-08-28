@@ -60,6 +60,7 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.flood_sleep_threshold_seconds == 60
     assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
+    assert config.output_height == 720
 
 
 def test_channel_group_remark_is_optional_and_does_not_change_database_name(
@@ -232,6 +233,53 @@ def test_flood_sleep_threshold_must_be_positive(tmp_path: Path, monkeypatch):
 
     with pytest.raises(ConfigError, match="flood_sleep_threshold_seconds"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (143, "144 到 2160"),
+        (2162, "144 到 2160"),
+        (481, "必须是偶数"),
+        ('"invalid"', "必须是整数"),
+    ],
+)
+def test_output_height_is_validated(
+    value: int | str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            "ffmpeg_threads = 3",
+            f"ffmpeg_threads = 3\noutput_height = {value}",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+def test_output_height_is_loaded(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            "ffmpeg_threads = 3",
+            "ffmpeg_threads = 3\noutput_height = 480",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    assert load_config(path).output_height == 480
 
 
 @pytest.mark.parametrize("value", [0, 9])

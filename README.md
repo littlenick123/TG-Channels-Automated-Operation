@@ -43,7 +43,7 @@
 - 仅选择具有 `grouped_id`、恰好包含一个视频且视频短边达到指定分辨率的媒体组。
 - 从源媒体组中只保留视频，不保留源媒体组原有图片。
 - 使用多路交错分片下载单个视频，支持 `.part` 文件断点续传。
-- 使用 FFmpeg 将视频转为 H.264/AAC、720P、`yuv420p` 并启用 `faststart`。
+- 使用 FFmpeg 将视频转为 H.264/AAC，可通过 `output_height` 选择480P、720P等输出高度，并启用 `yuv420p` 和 `faststart`。
 - 为视频单独生成 10% 时间点的封面。
 - 在视频 15%、50%、85% 时间点生成三张内容截图。
 - 按标签过滤规则生成标签，并把简介转换为可折叠引用。
@@ -416,6 +416,7 @@ ffmpeg_threads = 4
 crf = 24
 preset = "medium"
 audio_bitrate = "128k"
+output_height = 480
 minimum_source_short_edge = 1080
 album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
@@ -429,6 +430,7 @@ disk_reserve_bytes = 1073741824
 | `crf` | `23` | H.264 恒定质量参数，允许 `0–51`。数值越小质量越高、文件越大；示例使用 `24`。 |
 | `preset` | `medium` | x264 编码速度预设。越慢通常压缩效率越高。 |
 | `audio_bitrate` | `128k` | AAC 音频码率。 |
+| `output_height` | `720` | 输出视频的目标短边高度，必须是 `144–2160` 范围内的偶数；示例使用 `480`。 |
 | `minimum_source_short_edge` | `1080` | 源视频短边至少达到该像素数才可参与选择。 |
 | `album_settle_seconds` | `300` | 媒体组最后一条消息发布后至少等待多少秒再处理，避免索引到尚未发送完整的媒体组。 |
 | `disk_reserve_bytes` | `1073741824` | 除“源文件大小 × 3”外额外保留的磁盘空间，示例为 1 GiB。 |
@@ -439,9 +441,10 @@ disk_reserve_bytes = 1073741824
 - 音频编码：AAC。
 - 像素格式：`yuv420p`。
 - MP4：`+faststart`。
-- 横屏最大边界：`1280×720`。
-- 竖屏最大边界：`720×1280`。
+- `output_height = 720` 时，横屏最大边界为 `1280×720`，竖屏为 `720×1280`。
+- `output_height = 480` 时，横屏最大边界约为 `854×480`，竖屏为 `480×854`。
 - 保持宽高比并确保输出尺寸为偶数。
+- 修改 `output_height` 后只需重启已包含此功能的容器，不需要重新构建镜像。
 - 转码、截图和媒体组全部串行处理。
 
 ### `[runtime]` 运行限制和工作目录
@@ -629,6 +632,7 @@ ffmpeg_threads = 4
 crf = 24
 preset = "medium"
 audio_bitrate = "128k"
+output_height = 480
 minimum_source_short_edge = 1080
 album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
