@@ -35,9 +35,17 @@ CHANNEL_GROUP_ERRORS = (
     errors.ChannelBannedError,
     errors.ChannelPrivateError,
     errors.ChannelInvalidError,
+    errors.ChannelPublicGroupNaError,
+    errors.ChatForwardsRestrictedError,
+    errors.ChatGuestSendForbiddenError,
+    errors.ChatSendMediaForbiddenError,
+    errors.ChatSendPhotosForbiddenError,
+    errors.ChatSendVideosForbiddenError,
     errors.ChatWriteForbiddenError,
     errors.ChatAdminRequiredError,
+    errors.MessageAuthorRequiredError,
     errors.UserBannedInChannelError,
+    errors.UserNotParticipantError,
     errors.PeerIdInvalidError,
     errors.ChatForbiddenError,
 )
@@ -95,6 +103,14 @@ class SourceMediaUnavailable(TelegramError):
 
 class ChannelGroupUnavailable(TelegramError):
     """Raised when a configured source or target channel cannot be used."""
+
+
+class DeliveryUncertainError(ChannelGroupUnavailable):
+    """Raised when delivery may have produced more than one target album."""
+
+
+class StagingMediaUnavailable(TelegramError):
+    """Raised when a persisted staging album was deleted or changed."""
 
 
 class TelegramGateway:
@@ -158,6 +174,9 @@ class TelegramGateway:
 
     async def _target_entity(self) -> Any:
         return await self._resolve_entity(self._require_group().target_channel)
+
+    async def _staging_entity(self) -> Any:
+        return await self._resolve_entity(self.config.delivery.staging_channel)
 
     async def _resolve_entity(self, identifier: str | int) -> Any:
         if identifier in self._entities:
@@ -600,6 +619,159 @@ class TelegramGateway:
                 f"下载源频道媒体失败：{type(exc).__name__}: {exc}"
             ) from exc
 
+    @staticmethod
+    def _receipt_from_album(result: Any, description: str) -> DeliveryReceipt:
+        messages = list(result) if isinstance(result, (list, tuple)) else [result]
+        messages = [message for message in messages if message is not None]
+        if len(messages) != 4:
+            raise TelegramError(
+                f"{description}返回了 {len(messages)} 个媒体项，预期为 4"
+            )
+        ordered = sorted(messages, key=lambda message: int(message.id))
+        grouped_ids = {
+            int(message.grouped_id)
+            for message in ordered
+            if message.grouped_id is not None
+        }
+        if len(grouped_ids) != 1:
+            raise TelegramError(f"{description}的四个媒体项没有共享同一个 grouped_id")
+        return DeliveryReceipt(
+            message_ids=tuple(int(message.id) for message in ordered),
+            grouped_id=grouped_ids.pop(),
+        )
+
+    async def send_staging_album(
+        self,
+        files: list[Path],
+        caption_html: str,
+        route_id: str,
+        upload_started_at: str,
+        *,
+        video_info: VideoInfo,
+        thumbnail: Path,
+    ) -> DeliveryReceipt:
+        if len(files) != 4:
+            raise TelegramError("中转媒体组必须恰好包含 1 个视频和 3 张图片")
+        staging = await self._staging_entity()
+        route_caption = f"#{self._require_group().name}\nroute_id={route_id}"
+
+        async def operation() -> Any:
+            uploaded_video = await self.client.upload_file(str(files[0]))
+            uploaded_thumbnail = await self.client.upload_file(str(thumbnail))
+            video_media = InputMediaUploadedDocument(
+                file=uploaded_video,
+                thumb=uploaded_thumbnail,
+                mime_type="video/mp4",
+                attributes=[
+                    DocumentAttributeFilename(files[0].name),
+                    DocumentAttributeVideo(
+                        duration=video_info.duration,
+                        w=video_info.display_width,
+                        h=video_info.display_height,
+                        supports_streaming=True,
+                        nosound=not video_info.has_audio,
+                    ),
+                ],
+                nosound_video=True,
+            )
+            return await self.client.send_file(
+                staging,
+                [video_media, *(str(path) for path in files[1:])],
+                caption=[caption_html, "", "", route_caption],
+                parse_mode="html",
+                supports_streaming=True,
+            )
+
+        result: Any = None
+        last_error: Exception | None = None
+        delays = (0, *self.config.retry_delays_seconds)
+        for index, delay in enumerate(delays):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                result = await operation()
+                break
+            except FLOOD_WAIT_ERRORS as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "上传中转媒体组触发 %s，等待 %s 秒",
+                    type(exc).__name__,
+                    exc.seconds,
+                )
+                await asyncio.sleep(max(1, exc.seconds))
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"向中转频道上传失败：{type(exc).__name__}: {exc}"
+                ) from exc
+            except RuntimeError as exc:
+                if UPLOAD_PART_FAILURE_RE.fullmatch(str(exc)) is None:
+                    raise
+                last_error = exc
+                LOGGER.warning(
+                    "上传中转大文件分片失败，第 %s 次结果不确定：%s",
+                    index + 1,
+                    exc,
+                )
+                receipt = await self.find_matching_staging_album(
+                    upload_started_at, route_id
+                )
+                if receipt is not None:
+                    return receipt
+            except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "上传中转媒体组第 %s 次结果不确定：%s", index + 1, exc
+                )
+                receipt = await self.find_matching_staging_album(
+                    upload_started_at, route_id
+                )
+                if receipt is not None:
+                    return receipt
+        if result is None:
+            receipt = await self.find_matching_staging_album(upload_started_at, route_id)
+            if receipt is not None:
+                return receipt
+            raise TelegramError(f"上传中转媒体组重试耗尽：{last_error}") from last_error
+        return self._receipt_from_album(result, "Telegram 中转上传")
+
+    async def find_matching_staging_album(
+        self, started_at: str, route_id: str
+    ) -> DeliveryReceipt | None:
+        staging = await self._staging_entity()
+        since = datetime.fromisoformat(started_at)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        albums: dict[int, list[Any]] = defaultdict(list)
+        try:
+            async for message in self.client.iter_messages(staging, limit=100):
+                if message.date < since:
+                    break
+                if message.grouped_id is not None:
+                    albums[int(message.grouped_id)].append(message)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"核对中转频道失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        marker = f"route_id={route_id}"
+        matches: list[DeliveryReceipt] = []
+        for messages in albums.values():
+            ordered = sorted(messages, key=lambda item: item.id)
+            videos = sum(self._video_metadata(message)[0] for message in ordered)
+            photos = sum(getattr(message, "photo", None) is not None for message in ordered)
+            if (
+                len(ordered) == 4
+                and videos == 1
+                and photos == 3
+                and self._video_metadata(ordered[0])[0]
+                and marker in str(ordered[-1].raw_text or "")
+            ):
+                matches.append(self._receipt_from_album(ordered, "中转恢复检查"))
+        if len(matches) > 1:
+            raise DeliveryUncertainError(
+                f"中转频道存在多个 route_id={route_id} 的媒体组，请人工核对"
+            )
+        return matches[0] if matches else None
+
     async def send_album(
         self,
         files: list[Path],
@@ -739,25 +911,375 @@ class TelegramGateway:
     async def doctor(self) -> dict[str, str]:
         group = self._require_group()
         source = await self._source_entity()
-        target = await self._target_entity()
+        staging = await self._staging_entity()
+        if bool(getattr(staging, "noforwards", False)):
+            raise ChannelGroupUnavailable("中转频道启用了禁止保存内容，机器人无法复制媒体")
         try:
-            permissions = await self.client.get_permissions(target, "me")
+            permissions = await self.client.get_permissions(staging, "me")
         except CHANNEL_GROUP_ERRORS as exc:
             raise ChannelGroupUnavailable(
-                f"检查目标频道权限失败：{type(exc).__name__}: {exc}"
+                f"检查中转频道权限失败：{type(exc).__name__}: {exc}"
             ) from exc
         can_post = bool(
             getattr(permissions, "is_creator", False)
-            or getattr(permissions, "is_admin", False)
             or getattr(permissions, "post_messages", False)
         )
         if not can_post:
-            raise ChannelGroupUnavailable("当前用户没有目标频道发帖权限")
+            raise ChannelGroupUnavailable("当前用户没有中转频道发帖权限")
         me = await self.client.get_me()
         return {
             "group": group.name,
             "account": str(me.id),
             "source": str(getattr(source, "title", group.source_channel)),
+            "staging": str(
+                getattr(staging, "title", self.config.delivery.staging_channel)
+            ),
+            "staging_post_permission": "ok",
+            "staging_content_protection": "off",
+        }
+
+
+class BotDeliveryGateway:
+    """Uses the reporting bot account to copy staged albums to target channels."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        group: ChannelGroupConfig | None = None,
+        client: TelegramClient | None = None,
+        entity_cache: dict[str | int, Any] | None = None,
+    ):
+        self.config = config
+        self.group = group
+        config.delivery.bot_session_path.parent.mkdir(parents=True, exist_ok=True)
+        self.client = client or TelegramClient(
+            str(config.delivery.bot_session_path),
+            config.api_id,
+            config.api_hash,
+            flood_sleep_threshold=config.flood_sleep_threshold_seconds,
+        )
+        self.client.flood_sleep_threshold = config.flood_sleep_threshold_seconds
+        self._entities = entity_cache if entity_cache is not None else {}
+
+    def for_group(self, group: ChannelGroupConfig) -> BotDeliveryGateway:
+        return BotDeliveryGateway(
+            self.config,
+            group,
+            client=self.client,
+            entity_cache=self._entities,
+        )
+
+    def _require_group(self) -> ChannelGroupConfig:
+        if self.group is None:
+            raise RuntimeError("当前 BotDeliveryGateway 尚未绑定频道组")
+        return self.group
+
+    async def login(self) -> None:
+        try:
+            await self.client.start(bot_token=self.config.reporting.bot_token)
+        except (errors.RPCError, ValueError, OSError) as exc:
+            raise TelegramError(
+                f"分发机器人登录失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        me = await self.client.get_me()
+        if not bool(getattr(me, "bot", False)):
+            raise TelegramError("TG_REPORT_BOT_TOKEN 未登录为机器人账号")
+        session_filename = getattr(self.client.session, "filename", None)
+        if os.name != "nt" and session_filename:
+            session_file = Path(session_filename)
+            if session_file.exists():
+                session_file.chmod(0o600)
+        LOGGER.info("Telegram 分发机器人登录成功：bot_id=%s", me.id)
+
+    async def connect(self) -> None:
+        try:
+            await self.client.start(bot_token=self.config.reporting.bot_token)
+        except (errors.RPCError, ValueError, OSError) as exc:
+            raise TelegramError(
+                f"分发机器人连接失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        me = await self.client.get_me()
+        if not bool(getattr(me, "bot", False)):
+            await self.client.disconnect()
+            raise TelegramError("分发会话不是机器人账号")
+
+    async def disconnect(self) -> None:
+        if self.client.is_connected():
+            await self.client.disconnect()
+
+    async def _resolve_entity(self, identifier: str | int) -> Any:
+        if identifier in self._entities:
+            return self._entities[identifier]
+        try:
+            entity = await self.client.get_entity(identifier)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"机器人无法访问频道 {identifier}：{type(exc).__name__}: {exc}"
+            ) from exc
+        except ValueError:
+            try:
+                await self.client.get_dialogs(limit=None)
+                entity = await self.client.get_entity(identifier)
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"机器人无法访问频道 {identifier}：{type(exc).__name__}: {exc}"
+                ) from exc
+            except ValueError as exc:
+                raise ChannelGroupUnavailable(
+                    f"机器人无法解析频道 {identifier}"
+                ) from exc
+        self._entities[identifier] = entity
+        return entity
+
+    async def _staging_entity(self) -> Any:
+        return await self._resolve_entity(self.config.delivery.staging_channel)
+
+    async def _target_entity(self) -> Any:
+        return await self._resolve_entity(self._require_group().target_channel)
+
+    @staticmethod
+    def _media_fingerprint(message: Any) -> tuple[str, int, int]:
+        document = getattr(message, "video", None)
+        if document is not None:
+            return (
+                "video",
+                int(document.id),
+                int(getattr(document, "size", 0) or 0),
+            )
+        photo = getattr(message, "photo", None)
+        if photo is not None:
+            return ("photo", int(photo.id), 0)
+        raise StagingMediaUnavailable("中转媒体组包含非视频/图片项目")
+
+    @classmethod
+    def _album_fingerprint(cls, messages: list[Any]) -> tuple[tuple[str, int, int], ...]:
+        ordered = sorted(messages, key=lambda message: int(message.id))
+        if len(ordered) != 4:
+            raise StagingMediaUnavailable(
+                f"中转媒体组当前只有 {len(ordered)} 项，预期为 4"
+            )
+        fingerprint = tuple(cls._media_fingerprint(message) for message in ordered)
+        if [item[0] for item in fingerprint] != ["video", "photo", "photo", "photo"]:
+            raise StagingMediaUnavailable("中转媒体组顺序不是视频加三张图片")
+        grouped_ids = {
+            int(message.grouped_id)
+            for message in ordered
+            if message.grouped_id is not None
+        }
+        if len(grouped_ids) != 1:
+            raise StagingMediaUnavailable("中转媒体组的四项没有共享 grouped_id")
+        return fingerprint
+
+    async def staging_messages(self, message_ids: tuple[int, ...]) -> list[Any]:
+        if len(message_ids) != 4:
+            raise StagingMediaUnavailable("数据库没有保存完整的四项中转消息 ID")
+        staging = await self._staging_entity()
+        try:
+            result = await self.client.get_messages(staging, ids=list(message_ids))
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"机器人读取中转媒体组失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        messages = [message for message in result if message is not None]
+        self._album_fingerprint(messages)
+        return sorted(messages, key=lambda message: int(message.id))
+
+    async def find_matching_delivery(
+        self,
+        started_at: str,
+        staging_messages: list[Any],
+    ) -> DeliveryReceipt | None:
+        target = await self._target_entity()
+        since = datetime.fromisoformat(started_at)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=UTC)
+        expected = self._album_fingerprint(staging_messages)
+        albums: dict[int, list[Any]] = defaultdict(list)
+        try:
+            async for message in self.client.iter_messages(target, limit=100):
+                if message.date < since:
+                    break
+                if message.grouped_id is not None:
+                    albums[int(message.grouped_id)].append(message)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"机器人核对目标频道失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        matches: list[DeliveryReceipt] = []
+        for messages in albums.values():
+            try:
+                if self._album_fingerprint(messages) == expected:
+                    matches.append(
+                        TelegramGateway._receipt_from_album(messages, "目标恢复检查")
+                    )
+            except StagingMediaUnavailable:
+                continue
+        if len(matches) > 1:
+            raise DeliveryUncertainError(
+                "目标频道存在多个与中转媒体相同的近期媒体组，请人工核对"
+            )
+        return matches[0] if matches else None
+
+    async def copy_album(
+        self,
+        staging_message_ids: tuple[int, ...],
+        delivery_started_at: str,
+    ) -> DeliveryReceipt:
+        staging = await self._staging_entity()
+        target = await self._target_entity()
+        staging_messages = await self.staging_messages(staging_message_ids)
+        result: Any = None
+        last_error: Exception | None = None
+        delays = (0, *self.config.retry_delays_seconds)
+        for index, delay in enumerate(delays):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                result = await self.client.forward_messages(
+                    target,
+                    staging_messages,
+                    from_peer=staging,
+                    drop_author=True,
+                    drop_media_captions=True,
+                )
+                break
+            except FLOOD_WAIT_ERRORS as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "机器人分发媒体组触发 %s，等待 %s 秒",
+                    type(exc).__name__,
+                    exc.seconds,
+                )
+                await asyncio.sleep(max(1, exc.seconds))
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"机器人向目标频道分发失败：{type(exc).__name__}: {exc}"
+                ) from exc
+            except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "机器人分发媒体组第 %s 次结果不确定：%s", index + 1, exc
+                )
+                receipt = await self.find_matching_delivery(
+                    delivery_started_at, staging_messages
+                )
+                if receipt is not None:
+                    return receipt
+        if result is None:
+            receipt = await self.find_matching_delivery(
+                delivery_started_at, staging_messages
+            )
+            if receipt is not None:
+                return receipt
+            raise TelegramError(f"机器人分发媒体组重试耗尽：{last_error}") from last_error
+        return TelegramGateway._receipt_from_album(result, "机器人目标分发")
+
+    async def recover_delivery(
+        self,
+        staging_message_ids: tuple[int, ...],
+        delivery_started_at: str,
+    ) -> DeliveryReceipt | None:
+        messages = await self.staging_messages(staging_message_ids)
+        return await self.find_matching_delivery(delivery_started_at, messages)
+
+    async def apply_caption(
+        self,
+        receipt: DeliveryReceipt,
+        caption_html: str,
+        caption_plain: str,
+    ) -> None:
+        target = await self._target_entity()
+
+        async def operation() -> None:
+            await self.client.edit_message(
+                target,
+                receipt.message_ids[0],
+                caption_html,
+                parse_mode="html",
+            )
+            messages = await self.client.get_messages(
+                target, ids=list(receipt.message_ids)
+            )
+            ordered = sorted(
+                (message for message in messages if message is not None),
+                key=lambda message: int(message.id),
+            )
+            try:
+                TelegramGateway._receipt_from_album(ordered, "目标文案校验")
+                self._album_fingerprint(ordered)
+            except TelegramError as exc:
+                raise DeliveryUncertainError(
+                    f"目标媒体组结构校验失败，请人工核对：{exc}"
+                ) from exc
+            captions = [str(message.raw_text or "") for message in ordered]
+            if captions != [caption_plain, "", "", ""]:
+                raise TelegramError("目标媒体组文案校验失败")
+
+        await self._retry(operation, "写入目标媒体组文案")
+
+    async def _retry(self, operation: Callable[[], Awaitable[T]], description: str) -> T:
+        last_error: Exception | None = None
+        for delay in (0, *self.config.retry_delays_seconds):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                return await operation()
+            except FLOOD_WAIT_ERRORS as exc:
+                last_error = exc
+                LOGGER.warning(
+                    "%s 触发 %s，等待 %s 秒",
+                    description,
+                    type(exc).__name__,
+                    exc.seconds,
+                )
+                await asyncio.sleep(max(1, exc.seconds))
+            except CHANNEL_GROUP_ERRORS as exc:
+                raise ChannelGroupUnavailable(
+                    f"{description}失败：{type(exc).__name__}: {exc}"
+                ) from exc
+            except (TimeoutError, errors.ServerError, errors.RpcCallFailError, OSError) as exc:
+                last_error = exc
+                LOGGER.warning("%s 临时失败：%s", description, exc)
+        raise TelegramError(f"{description}重试耗尽：{last_error}") from last_error
+
+    async def doctor(self) -> dict[str, str]:
+        group = self._require_group()
+        me = await self.client.get_me()
+        if not bool(getattr(me, "bot", False)):
+            raise ChannelGroupUnavailable("当前分发会话不是机器人账号")
+        staging = await self._staging_entity()
+        target = await self._target_entity()
+        if bool(getattr(staging, "noforwards", False)):
+            raise ChannelGroupUnavailable("中转频道启用了禁止保存内容")
+        try:
+            await self.client.get_messages(staging, limit=1)
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"机器人无法读取中转频道历史：{type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            permissions = await self.client.get_permissions(target, "me")
+        except CHANNEL_GROUP_ERRORS as exc:
+            raise ChannelGroupUnavailable(
+                f"检查机器人目标权限失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        is_owner = bool(getattr(permissions, "is_creator", False))
+        can_post = bool(
+            is_owner or getattr(permissions, "post_messages", False)
+        )
+        can_edit = bool(
+            is_owner or getattr(permissions, "edit_messages", False)
+        )
+        if not can_post:
+            raise ChannelGroupUnavailable("分发机器人没有目标频道发帖权限")
+        if not can_edit:
+            raise ChannelGroupUnavailable("分发机器人没有目标频道编辑消息权限")
+        return {
+            "delivery_bot": str(me.id),
+            "staging": str(
+                getattr(staging, "title", self.config.delivery.staging_channel)
+            ),
             "target": str(getattr(target, "title", group.target_channel)),
-            "post_permission": "ok",
+            "target_post_permission": "ok",
+            "target_edit_permission": "ok",
         }

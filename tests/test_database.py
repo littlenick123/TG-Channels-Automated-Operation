@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from channel_operator.database import DatabaseIdentityError, StateDatabase
-from channel_operator.models import MessageSnapshot
+from channel_operator.models import DeliveryReceipt, MessageSnapshot
 
 
 def snapshot(
@@ -191,4 +191,39 @@ def test_daily_stats_and_report_cursor_persist_across_reopen(tmp_path):
     assert stats.paused_reason == "频道被封"
     assert stats.has_activity is True
     assert reopened.continuous_report_cursor("2026-01-01") == "2026-08-12"
+    reopened.close()
+
+
+def test_staging_and_delivery_state_persist_for_restart_recovery(tmp_path):
+    path = tmp_path / "state.db"
+    database = StateDatabase(path)
+    database.save_messages(
+        "source",
+        [snapshot(1, 10, video=True, width=1920, height=1080, caption="#一")],
+        1,
+    )
+    database.refresh_groups("source")
+    database.begin_attempt("source", 10, "2026-08-12")
+    database.begin_staging_upload(
+        "source", 10, -100999, "<b>#一</b>", "#一"
+    )
+    database.mark_staged(
+        "source", 10, -100999, DeliveryReceipt((101, 102, 103, 104), 888)
+    )
+    database.begin_delivery("source", 10)
+    database.mark_caption_pending(
+        "source", 10, DeliveryReceipt((201, 202, 203, 204), 999)
+    )
+    database.close()
+
+    reopened = StateDatabase(path)
+    candidate = reopened.next_candidate("source", "2026-08-12", 1080, 0, set())
+
+    assert candidate is not None
+    assert candidate.status == "caption_pending"
+    assert candidate.attempt_caption_html == "<b>#一</b>"
+    assert candidate.staging_message_ids == (101, 102, 103, 104)
+    assert candidate.staging_grouped_id == 888
+    assert candidate.destination_message_ids == (201, 202, 203, 204)
+    assert candidate.destination_grouped_id == 999
     reopened.close()

@@ -21,6 +21,10 @@ class FakeTelegram:
         self.sent_caption = None
         self.sent_thumbnail = None
         self.sent_video_info = None
+        self.route_id = None
+        self.staging_uploads = 0
+        self.copy_calls = 0
+        self.caption_calls = 0
         self.downloaded_message_ids = []
 
     async def scan_messages(self, min_id):
@@ -34,21 +38,38 @@ class FakeTelegram:
         destination.write_bytes(b"source")
         return destination
 
-    async def send_album(
+    async def send_staging_album(
         self,
         files,
         caption_html,
-        caption_plain,
+        route_id,
         upload_started_at,
         *,
         video_info,
         thumbnail,
     ):
+        self.staging_uploads += 1
         self.sent_files = [path.name for path in files]
         self.sent_caption = caption_html
+        self.route_id = route_id
         self.sent_thumbnail = thumbnail.name
         self.sent_video_info = video_info
         return DeliveryReceipt((101, 102, 103, 104), 999)
+
+    async def find_matching_staging_album(self, started_at, route_id):
+        return None
+
+    async def copy_album(self, staging_message_ids, delivery_started_at):
+        self.copy_calls += 1
+        assert staging_message_ids == (101, 102, 103, 104)
+        return DeliveryReceipt((201, 202, 203, 204), 1999)
+
+    async def recover_delivery(self, staging_message_ids, delivery_started_at):
+        return None
+
+    async def apply_caption(self, receipt, caption_html, caption_plain):
+        self.caption_calls += 1
+        assert receipt == DeliveryReceipt((201, 202, 203, 204), 1999)
 
     async def find_matching_album(self, started_at, caption_plain):
         return None
@@ -74,18 +95,18 @@ class ExhaustedUploadTelegram(FakeTelegram):
         super().__init__(snapshots)
         self.upload_files_existed = False
 
-    async def send_album(
+    async def send_staging_album(
         self,
         files,
         caption_html,
-        caption_plain,
+        route_id,
         upload_started_at,
         *,
         video_info,
         thumbnail,
     ):
         self.upload_files_existed = all(path.exists() for path in [*files, thumbnail])
-        raise TelegramError("发送目标媒体组重试耗尽")
+        raise TelegramError("上传中转媒体组重试耗尽")
 
 
 class SlowFirstDownloadTelegram(FakeTelegram):
@@ -172,6 +193,7 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
     assert telegram.sent_thumbnail == "video_thumb.jpg"
     assert telegram.sent_video_info.display_width == 1280
     assert telegram.sent_video_info.display_height == 720
+    assert telegram.route_id == "test_group:-100111:123"
     assert list(config.work_dir.iterdir()) == []
     assert database.published_count(str(group.source_channel), summary.run_date) == 1
     database.close()
@@ -551,4 +573,138 @@ async def test_continuous_mode_does_not_retry_failed_media_on_same_date(app_conf
     assert first.retryable_failures == 1
     assert second.attempted == 0
     assert telegram.downloaded_message_ids == [source.message_id]
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_retry_reuses_staging_album_without_reprocessing(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=30,
+        grouped_id=630,
+        caption="标签：#中转\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    class RetryDelivery(FakeTelegram):
+        async def copy_album(self, staging_message_ids, delivery_started_at):
+            self.copy_calls += 1
+            if self.copy_calls == 1:
+                raise TelegramError("机器人分发媒体组重试耗尽")
+            return DeliveryReceipt((201, 202, 203, 204), 1999)
+
+    database = StateDatabase(group.database_path)
+    telegram = RetryDelivery(source)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    first = await service.run_once()
+    second = await service.run_once()
+
+    assert first.retryable_failures == 1
+    assert second.published == 1
+    assert telegram.downloaded_message_ids == [source.message_id]
+    assert telegram.staging_uploads == 1
+    assert telegram.copy_calls == 2
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_staging_upload_recovery_finds_route_without_reuploading(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=32,
+        grouped_id=632,
+        caption="标签：#恢复\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    class RecoveredStagingTelegram(FakeTelegram):
+        async def find_matching_staging_album(self, started_at, route_id):
+            assert started_at
+            assert route_id == "test_group:-100111:632"
+            return DeliveryReceipt((101, 102, 103, 104), 999)
+
+    database = StateDatabase(group.database_path)
+    database.save_messages(str(group.source_channel), [source], source.message_id)
+    database.refresh_groups(str(group.source_channel))
+    database.begin_attempt(str(group.source_channel), source.grouped_id, "2026-08-12")
+    database.begin_staging_upload(
+        str(group.source_channel),
+        source.grouped_id,
+        config.delivery.staging_channel,
+        "<b>#恢复</b>",
+        "#恢复",
+    )
+    telegram = RecoveredStagingTelegram(source)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    result = await service.run_once()
+
+    assert result.published == 1
+    assert result.reconciled == 1
+    assert telegram.downloaded_message_ids == []
+    assert telegram.staging_uploads == 0
+    assert telegram.copy_calls == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_caption_pending_retries_only_caption_edit(app_config):
+    config = app_config(daily_success_count=1)
+    group = config.channel_groups[0]
+    source = MessageSnapshot(
+        message_id=31,
+        grouped_id=631,
+        caption="标签：#文案\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+
+    class CaptionRetryDelivery(FakeTelegram):
+        async def apply_caption(self, receipt, caption_html, caption_plain):
+            self.caption_calls += 1
+            if self.caption_calls == 1:
+                raise TelegramError("编辑目标文案临时失败")
+
+    database = StateDatabase(group.database_path)
+    telegram = CaptionRetryDelivery(source)
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), FakeReporter()
+    )
+
+    first = await service.run_once()
+    assert first.retryable_failures == 1
+    assert database.group_status(str(group.source_channel), source.grouped_id) == (
+        "caption_pending"
+    )
+    second = await service.run_once()
+
+    assert second.published == 1
+    assert telegram.downloaded_message_ids == [source.message_id]
+    assert telegram.staging_uploads == 1
+    assert telegram.copy_calls == 1
+    assert telegram.caption_calls == 2
     database.close()

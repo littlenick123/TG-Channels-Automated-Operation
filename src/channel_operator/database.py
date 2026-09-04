@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .models import DailyStats, MediaGroup, MessageSnapshot
+from .models import DailyStats, DeliveryReceipt, MediaGroup, MessageSnapshot
 
 
 class DatabaseIdentityError(RuntimeError):
@@ -115,6 +115,25 @@ class StateDatabase:
             );
             """
         )
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(media_groups)")
+        }
+        additions = {
+            "staging_channel": "TEXT",
+            "staging_upload_started_at": "TEXT",
+            "staging_message_ids": "TEXT",
+            "staging_grouped_id": "TEXT",
+            "staged_at": "TEXT",
+            "delivery_started_at": "TEXT",
+            "delivery_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "caption_applied": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE media_groups ADD COLUMN {name} {declaration}"
+                )
         self.connection.commit()
 
     def _bind_identity(
@@ -271,6 +290,10 @@ class StateDatabase:
         return len(grouped)
 
     def _to_group(self, row: sqlite3.Row) -> MediaGroup:
+        def message_ids(column: str) -> tuple[int, ...]:
+            value = row[column]
+            return tuple(int(item) for item in json.loads(value)) if value else ()
+
         return MediaGroup(
             source_channel=row["source_channel"],
             grouped_id=int(row["grouped_id"]),
@@ -285,7 +308,24 @@ class StateDatabase:
             selected_date=row["selected_date"],
             attempts=int(row["attempts"]),
             upload_started_at=row["upload_started_at"],
+            attempt_caption_html=row["attempt_caption_html"],
             attempt_caption_plain=row["attempt_caption_plain"],
+            staging_upload_started_at=row["staging_upload_started_at"],
+            staging_message_ids=message_ids("staging_message_ids"),
+            staging_grouped_id=(
+                int(row["staging_grouped_id"])
+                if row["staging_grouped_id"] is not None
+                else None
+            ),
+            staged_at=row["staged_at"],
+            delivery_started_at=row["delivery_started_at"],
+            destination_message_ids=message_ids("destination_message_ids"),
+            destination_grouped_id=(
+                int(row["destination_grouped_id"])
+                if row["destination_grouped_id"] is not None
+                else None
+            ),
+            caption_applied=bool(row["caption_applied"]),
         )
 
     def next_candidate(
@@ -306,7 +346,8 @@ class StateDatabase:
         retryable_parameters: list[Any] = []
         if retryable_before_date is not None:
             retryable_sql = (
-                "AND (status != 'retryable' OR selected_date IS NULL "
+                "AND (status NOT IN ('retryable', 'delivery_retryable') "
+                "OR selected_date IS NULL "
                 "OR selected_date < ?)"
             )
             retryable_parameters.append(retryable_before_date)
@@ -321,13 +362,22 @@ class StateDatabase:
             f"""
             SELECT * FROM media_groups
             WHERE source_channel = ?
-              AND status IN ('selected', 'retryable', 'downloading', 'transcoding', 'uploading')
+              AND status IN (
+                  'selected', 'retryable', 'downloading', 'transcoding', 'uploading',
+                  'staging_uploading', 'staged', 'delivering', 'caption_pending',
+                  'delivery_retryable', 'delivery_uncertain'
+              )
               AND video_count = 1
               AND MIN(width, height) >= ?
               AND newest_message_at <= ?
               {retryable_sql}
               {excluded_sql}
-            ORDER BY CASE WHEN status = 'uploading' THEN 0 ELSE 1 END,
+            ORDER BY CASE
+                         WHEN status IN ('caption_pending', 'delivering', 'staged',
+                                         'delivery_retryable', 'staging_uploading',
+                                         'delivery_uncertain', 'uploading') THEN 0
+                         ELSE 1
+                     END,
                      selected_date, updated_at
             LIMIT 1
             """,
@@ -364,7 +414,8 @@ class StateDatabase:
         parameters: list[Any] = [source_channel, minimum_short_edge, cutoff]
         if retryable_before_date is not None:
             retryable_sql = (
-                "AND (status != 'retryable' OR selected_date IS NULL "
+                "AND (status NOT IN ('retryable', 'delivery_retryable') "
+                "OR selected_date IS NULL "
                 "OR selected_date < ?)"
             )
             parameters.append(retryable_before_date)
@@ -374,7 +425,9 @@ class StateDatabase:
             SELECT * FROM media_groups
             WHERE source_channel = ?
               AND status IN ('indexed', 'selected', 'retryable', 'downloading',
-                             'transcoding', 'uploading')
+                             'transcoding', 'uploading', 'staging_uploading', 'staged',
+                             'delivering', 'caption_pending', 'delivery_retryable',
+                             'delivery_uncertain')
               AND video_count = 1 AND MIN(width, height) >= ? AND newest_message_at <= ?
               {retryable_sql}
             ORDER BY RANDOM() LIMIT ?
@@ -467,7 +520,12 @@ class StateDatabase:
             UPDATE media_groups
             SET status='selected', selected_date=?, attempts=attempts+1,
                 attempt_caption_html=NULL, attempt_caption_plain=NULL,
-                upload_started_at=NULL, last_error=NULL, updated_at=?
+                upload_started_at=NULL, staging_channel=NULL,
+                staging_upload_started_at=NULL, staging_message_ids=NULL,
+                staging_grouped_id=NULL, staged_at=NULL,
+                delivery_started_at=NULL, delivery_attempts=0,
+                destination_message_ids=NULL, destination_grouped_id=NULL,
+                caption_applied=0, last_error=NULL, updated_at=?
             WHERE source_channel=? AND grouped_id=?
             """,
             (run_date, datetime.now(UTC).isoformat(), source_channel, str(grouped_id)),
@@ -483,6 +541,26 @@ class StateDatabase:
             (status, datetime.now(UTC).isoformat(), source_channel, str(grouped_id)),
         )
         self.connection.commit()
+
+    def has_staging_album(self, source_channel: str, grouped_id: int) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT staging_message_ids FROM media_groups
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (source_channel, str(grouped_id)),
+        ).fetchone()
+        return bool(row and row["staging_message_ids"])
+
+    def group_status(self, source_channel: str, grouped_id: int) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT status FROM media_groups
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (source_channel, str(grouped_id)),
+        ).fetchone()
+        return str(row["status"]) if row else None
 
     def begin_upload(
         self, source_channel: str, grouped_id: int, caption_html: str, caption_plain: str
@@ -507,6 +585,127 @@ class StateDatabase:
         self.connection.commit()
         return started_at
 
+    def begin_staging_upload(
+        self,
+        source_channel: str,
+        grouped_id: int,
+        staging_channel: str | int,
+        caption_html: str,
+        caption_plain: str,
+    ) -> str:
+        started_at = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """
+            UPDATE media_groups
+            SET status='staging_uploading', staging_channel=?,
+                staging_upload_started_at=?, attempt_caption_html=?,
+                attempt_caption_plain=?, last_error=NULL, updated_at=?
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (
+                str(staging_channel),
+                started_at,
+                caption_html,
+                caption_plain,
+                started_at,
+                source_channel,
+                str(grouped_id),
+            ),
+        )
+        self.connection.commit()
+        return started_at
+
+    def mark_staged(
+        self,
+        source_channel: str,
+        grouped_id: int,
+        staging_channel: str | int,
+        receipt: DeliveryReceipt,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """
+            UPDATE media_groups
+            SET status='staged', staging_channel=?, staging_message_ids=?,
+                staging_grouped_id=?, staged_at=?, last_error=NULL, updated_at=?
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (
+                str(staging_channel),
+                json.dumps(receipt.message_ids),
+                str(receipt.grouped_id),
+                now,
+                now,
+                source_channel,
+                str(grouped_id),
+            ),
+        )
+        self.connection.commit()
+
+    def begin_delivery(self, source_channel: str, grouped_id: int) -> str:
+        started_at = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """
+            UPDATE media_groups
+            SET status='delivering', delivery_started_at=?,
+                delivery_attempts=delivery_attempts+1, last_error=NULL, updated_at=?
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (started_at, started_at, source_channel, str(grouped_id)),
+        )
+        self.connection.commit()
+        return started_at
+
+    def mark_caption_pending(
+        self,
+        source_channel: str,
+        grouped_id: int,
+        receipt: DeliveryReceipt,
+        error: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """
+            UPDATE media_groups
+            SET status='caption_pending', destination_message_ids=?,
+                destination_grouped_id=?, caption_applied=0, last_error=?, updated_at=?
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (
+                json.dumps(receipt.message_ids),
+                str(receipt.grouped_id),
+                error[:2000] if error else None,
+                now,
+                source_channel,
+                str(grouped_id),
+            ),
+        )
+        self.connection.commit()
+
+    def mark_delivery_failure(
+        self,
+        source_channel: str,
+        grouped_id: int,
+        error: str,
+        *,
+        uncertain: bool = False,
+    ) -> None:
+        status = "delivery_uncertain" if uncertain else "delivery_retryable"
+        self.connection.execute(
+            """
+            UPDATE media_groups SET status=?, last_error=?, updated_at=?
+            WHERE source_channel=? AND grouped_id=?
+            """,
+            (
+                status,
+                error[:2000],
+                datetime.now(UTC).isoformat(),
+                source_channel,
+                str(grouped_id),
+            ),
+        )
+        self.connection.commit()
+
     def mark_published(
         self,
         source_channel: str,
@@ -520,7 +719,7 @@ class StateDatabase:
             """
             UPDATE media_groups
             SET status='published', destination_message_ids=?, destination_grouped_id=?,
-                published_date=?, last_error=NULL, updated_at=?
+                published_date=?, caption_applied=1, last_error=NULL, updated_at=?
             WHERE source_channel=? AND grouped_id=?
             """,
             (

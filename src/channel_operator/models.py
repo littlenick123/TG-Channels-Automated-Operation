@@ -38,7 +38,16 @@ class MediaGroup:
     selected_date: str | None = None
     attempts: int = 0
     upload_started_at: str | None = None
+    attempt_caption_html: str | None = None
     attempt_caption_plain: str | None = None
+    staging_upload_started_at: str | None = None
+    staging_message_ids: tuple[int, ...] = ()
+    staging_grouped_id: int | None = None
+    staged_at: str | None = None
+    delivery_started_at: str | None = None
+    destination_message_ids: tuple[int, ...] = ()
+    destination_grouped_id: int | None = None
+    caption_applied: bool = False
 
 
 @dataclass(frozen=True, slots=True)

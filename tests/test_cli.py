@@ -64,6 +64,9 @@ async def test_continuous_run_once_enables_cycle_summary(app_config, monkeypatch
         async def disconnect(self):
             return None
 
+    class FakeDelivery(FakeTelegram):
+        pass
+
     class FakeMedia:
         def __init__(self, loaded_config):
             assert loaded_config is config
@@ -76,8 +79,11 @@ async def test_continuous_run_once_enables_cycle_summary(app_config, monkeypatch
             return None
 
     class FakeRunner:
-        def __init__(self, loaded_config, telegram, media, reporter):
+        def __init__(
+            self, loaded_config, telegram, media, reporter, *, delivery=None
+        ):
             assert loaded_config is config
+            assert delivery is not None
 
         async def run_once(self, groups, **kwargs):
             captured.update(kwargs)
@@ -100,6 +106,7 @@ async def test_continuous_run_once_enables_cycle_summary(app_config, monkeypatch
 
     monkeypatch.setattr("channel_operator.cli.load_config", lambda path: config)
     monkeypatch.setattr("channel_operator.cli.TelegramGateway", FakeTelegram)
+    monkeypatch.setattr("channel_operator.cli.BotDeliveryGateway", FakeDelivery)
     monkeypatch.setattr("channel_operator.cli.MediaProcessor", FakeMedia)
     monkeypatch.setattr("channel_operator.cli.BotReporter", FakeReporter)
     monkeypatch.setattr("channel_operator.cli.MultiChannelRunner", FakeRunner)

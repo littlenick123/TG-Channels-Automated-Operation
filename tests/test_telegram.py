@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,9 @@ from telethon.tl.types import (
 
 from channel_operator.models import DeliveryReceipt, VideoInfo
 from channel_operator.telegram import (
+    BotDeliveryGateway,
     ChannelGroupUnavailable,
+    DeliveryUncertainError,
     DownloadTooSlowError,
     TelegramError,
     TelegramGateway,
@@ -529,3 +532,137 @@ async def test_private_channel_error_is_promoted_to_group_failure(app_config):
 
     with pytest.raises(ChannelGroupUnavailable, match="无法访问"):
         await gateway._source_entity()
+
+
+@pytest.mark.asyncio
+async def test_staging_album_keeps_official_caption_and_route_on_last_photo(
+    app_config, tmp_path: Path
+):
+    client = FakeClient()
+    config = app_config()
+    gateway = TelegramGateway(config, config.channel_groups[0], client=client)
+    files, thumbnail, video_info = _album_files(tmp_path)
+
+    receipt = await gateway.send_staging_album(
+        files,
+        "<b>#标签</b>",
+        "test_group:-100111:123",
+        "2026-08-10T00:00:00+00:00",
+        video_info=video_info,
+        thumbnail=thumbnail,
+    )
+
+    assert receipt == DeliveryReceipt((10, 11, 12, 13), 777)
+    entity, _, options = client.calls[0]
+    assert entity == config.delivery.staging_channel
+    assert options["caption"] == [
+        "<b>#标签</b>",
+        "",
+        "",
+        "#test_group\nroute_id=test_group:-100111:123",
+    ]
+
+
+def _media_message(message_id, grouped_id, *, video_id=None, photo_id=None, text=""):
+    return SimpleNamespace(
+        id=message_id,
+        grouped_id=grouped_id,
+        video=(
+            SimpleNamespace(id=video_id, size=12345)
+            if video_id is not None
+            else None
+        ),
+        photo=SimpleNamespace(id=photo_id) if photo_id is not None else None,
+        raw_text=text,
+        date=datetime.now(UTC),
+    )
+
+
+class BotCopyClient:
+    def __init__(self):
+        self.staging = [
+            _media_message(1, 100, video_id=500),
+            _media_message(2, 100, photo_id=501),
+            _media_message(3, 100, photo_id=502),
+            _media_message(
+                4,
+                100,
+                photo_id=503,
+                text="#test_group\nroute_id=test_group:-100111:123",
+            ),
+        ]
+        self.target = [
+            _media_message(11, 200, video_id=500),
+            _media_message(12, 200, photo_id=501),
+            _media_message(13, 200, photo_id=502),
+            _media_message(14, 200, photo_id=503),
+        ]
+        self.forward_calls = []
+        self.edit_calls = []
+        self.flood_sleep_threshold = 60
+
+    async def get_entity(self, entity):
+        return entity
+
+    async def get_messages(self, entity, *, ids=None, limit=None):
+        if ids is None:
+            return self.staging[:1]
+        source = self.staging if entity == -100999 else self.target
+        wanted = set(ids)
+        return [message for message in source if message.id in wanted]
+
+    async def forward_messages(self, entity, messages, **kwargs):
+        self.forward_calls.append((entity, messages, kwargs))
+        return self.target
+
+    async def edit_message(self, entity, message_id, text, **kwargs):
+        self.edit_calls.append((entity, message_id, text, kwargs))
+        self.target[0].raw_text = "#标签"
+
+
+@pytest.mark.asyncio
+async def test_bot_copies_album_without_route_or_forward_header_then_sets_caption(
+    app_config,
+):
+    config = app_config(retry_delays_seconds=())
+    client = BotCopyClient()
+    gateway = BotDeliveryGateway(config, config.channel_groups[0], client=client)
+
+    receipt = await gateway.copy_album(
+        (1, 2, 3, 4), "2026-08-10T00:00:00+00:00"
+    )
+    await gateway.apply_caption(receipt, "<b>#标签</b>", "#标签")
+
+    assert receipt == DeliveryReceipt((11, 12, 13, 14), 200)
+    assert client.forward_calls[0][2]["drop_author"] is True
+    assert client.forward_calls[0][2]["drop_media_captions"] is True
+    assert client.edit_calls == [
+        (-100222, 11, "<b>#标签</b>", {"parse_mode": "html"})
+    ]
+    assert [message.raw_text for message in client.target] == ["#标签", "", "", ""]
+
+
+@pytest.mark.asyncio
+async def test_bot_recovery_rejects_multiple_matching_target_albums(app_config):
+    config = app_config(retry_delays_seconds=())
+    client = BotCopyClient()
+    duplicate = [
+        _media_message(21, 300, video_id=500),
+        _media_message(22, 300, photo_id=501),
+        _media_message(23, 300, photo_id=502),
+        _media_message(24, 300, photo_id=503),
+    ]
+    client.target.extend(duplicate)
+
+    async def iter_messages(entity, limit):
+        del entity, limit
+        for message in reversed(client.target):
+            yield message
+
+    client.iter_messages = iter_messages
+    gateway = BotDeliveryGateway(config, config.channel_groups[0], client=client)
+
+    with pytest.raises(DeliveryUncertainError, match="多个"):
+        await gateway.recover_delivery(
+            (1, 2, 3, 4), "2026-08-10T00:00:00+00:00"
+        )

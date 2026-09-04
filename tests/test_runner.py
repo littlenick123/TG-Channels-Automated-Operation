@@ -54,18 +54,30 @@ class BoundGateway:
         destination.write_bytes(b"source")
         return destination
 
-    async def send_album(
+    async def send_staging_album(
         self,
         files,
         caption_html,
-        caption_plain,
+        route_id,
         upload_started_at,
         *,
         video_info,
         thumbnail,
     ):
-        self.events.append(f"send:{self.group.name}")
         return DeliveryReceipt((1, 2, 3, 4), 999)
+
+    async def find_matching_staging_album(self, started_at, route_id):
+        return None
+
+    async def copy_album(self, staging_message_ids, delivery_started_at):
+        self.events.append(f"send:{self.group.name}")
+        return DeliveryReceipt((11, 12, 13, 14), 1999)
+
+    async def recover_delivery(self, staging_message_ids, delivery_started_at):
+        return None
+
+    async def apply_caption(self, receipt, caption_html, caption_plain):
+        return None
 
     async def find_matching_album(self, started_at, caption_plain):
         return None

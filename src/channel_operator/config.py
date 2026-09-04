@@ -99,6 +99,12 @@ class ReportingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DeliveryConfig:
+    staging_channel: str | int
+    bot_session_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     api_id: int
     api_hash: str
@@ -106,6 +112,7 @@ class AppConfig:
     session_path: Path
     channel_groups: tuple[ChannelGroupConfig, ...]
     reporting: ReportingConfig
+    delivery: DeliveryConfig
     keep_tags: tuple[str, ...]
     drop_tags: tuple[str, ...]
     caption_limit: int
@@ -158,6 +165,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     processing = _section(data, "processing")
     runtime = _section(data, "runtime")
     reporting = _section(data, "reporting")
+    delivery = _section(data, "delivery")
     base = config_path.parent
     database_dir = _resolve_path(base, str(runtime.get("database_dir", "./data")))
 
@@ -296,6 +304,9 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
     report_bot_token = os.getenv("TG_REPORT_BOT_TOKEN", "").strip()
     if not report_bot_token:
         raise ConfigError(".env 中必须设置 TG_REPORT_BOT_TOKEN")
+    if "staging_channel" not in delivery:
+        raise ConfigError("缺少配置项 delivery.staging_channel")
+    staging_channel = _channel(delivery["staging_channel"])
     has_chat_id = "chat_id" in reporting
     has_chat_ids = "chat_ids" in reporting
     if has_chat_id and has_chat_ids:
@@ -340,6 +351,13 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             report_bot_token,
             report_chat_ids,
             report_server_name,
+        ),
+        delivery=DeliveryConfig(
+            staging_channel=staging_channel,
+            bot_session_path=_resolve_path(
+                base,
+                os.getenv("TG_BOT_SESSION_PATH", "./data/telegram-bot"),
+            ),
         ),
         keep_tags=keep_tags,
         drop_tags=drop_tags,
@@ -392,6 +410,8 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             "以下频道组的 daily_success_count 超过 max_candidates_per_run："
             + ", ".join(oversized_groups)
         )
+    if config.session_path == config.delivery.bot_session_path:
+        raise ConfigError("TG_SESSION_PATH 与 TG_BOT_SESSION_PATH 不能使用同一路径")
     if not 1 <= config.ffmpeg_threads <= 4:
         raise ConfigError("4C VPS 的 ffmpeg_threads 必须在 1 到 4 之间")
     if not 0 <= config.crf <= 51:

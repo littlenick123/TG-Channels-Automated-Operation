@@ -12,7 +12,7 @@ from .reporting import BotReporter, ReporterError
 from .runner import MultiChannelRunner
 from .scheduler import run_continuous_scheduler, run_scheduler
 from .service import AutomationService
-from .telegram import TelegramError, TelegramGateway
+from .telegram import BotDeliveryGateway, TelegramError, TelegramGateway
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -89,11 +89,15 @@ async def _run_continuous(config: AppConfig) -> int:
     config.work_dir.mkdir(parents=True, exist_ok=True)
     media = MediaProcessor(config)
     telegram = TelegramGateway(config)
+    delivery = BotDeliveryGateway(config)
     reporter = BotReporter(config.reporting)
     paused_groups: dict[str, str] = {}
     try:
         await telegram.connect()
-        runner = MultiChannelRunner(config, telegram, media, reporter)
+        await delivery.connect()
+        runner = MultiChannelRunner(
+            config, telegram, media, reporter, delivery=delivery
+        )
 
         async def run_cycle() -> int:
             results = await runner.run_once(
@@ -116,6 +120,7 @@ async def _run_continuous(config: AppConfig) -> int:
             )
     finally:
         await reporter.close()
+        await delivery.disconnect()
         await telegram.disconnect()
 
 
@@ -140,18 +145,23 @@ async def _run(arguments: argparse.Namespace) -> int:
 
     media = MediaProcessor(config)
     telegram = TelegramGateway(config)
+    delivery = BotDeliveryGateway(config)
 
     if arguments.command == "login":
         try:
             await telegram.login()
+            await delivery.login()
         finally:
+            await delivery.disconnect()
             await telegram.disconnect()
         return 0
 
     groups = _select_groups(config, getattr(arguments, "group", None))
-    await telegram.connect()
     reporter = BotReporter(config.reporting)
     try:
+        await telegram.connect()
+        if arguments.command in {"doctor", "run-once"}:
+            await delivery.connect()
         if arguments.command == "doctor":
             config.work_dir.mkdir(parents=True, exist_ok=True)
             ffmpeg = await media.version(config.ffmpeg_path)
@@ -197,12 +207,15 @@ async def _run(arguments: argparse.Namespace) -> int:
             bot_username = await reporter.doctor()
             print(f"report_bot: @{bot_username}")
             print(f"report_server: {reporter.server_name}")
+            print(f"staging_channel: {config.delivery.staging_channel}")
+            print(f"bot_session_path: {config.delivery.bot_session_path}")
             failed = False
             for group in groups:
                 database: StateDatabase | None = None
                 try:
                     database = _database(group)
                     checks = await telegram.for_group(group).doctor()
+                    checks.update(await delivery.for_group(group).doctor())
                     print(f"\n[{group.display_name}]")
                     for name, value in checks.items():
                         print(f"{name}: {value}")
@@ -235,6 +248,7 @@ async def _run(arguments: argparse.Namespace) -> int:
                             telegram.for_group(group),
                             media,
                             reporter,
+                            delivery=delivery.for_group(group),
                         )
                         count = await service.index()
                         print(
@@ -261,6 +275,7 @@ async def _run(arguments: argparse.Namespace) -> int:
                             telegram.for_group(group),
                             media,
                             reporter,
+                            delivery=delivery.for_group(group),
                         )
                         previews = await service.dry_run(
                             continuous=config.schedule_mode == "continuous"
@@ -278,7 +293,9 @@ async def _run(arguments: argparse.Namespace) -> int:
                         if database is not None:
                             database.close()
                 return 2 if failed else 0
-            runner = MultiChannelRunner(config, telegram, media, reporter)
+            runner = MultiChannelRunner(
+                config, telegram, media, reporter, delivery=delivery
+            )
             continuous = config.schedule_mode == "continuous"
             results = await runner.run_once(
                 groups,
@@ -294,6 +311,7 @@ async def _run(arguments: argparse.Namespace) -> int:
             return 0 if all(result.succeeded for result in results) else 2
     finally:
         await reporter.close()
+        await delivery.disconnect()
         await telegram.disconnect()
 
 

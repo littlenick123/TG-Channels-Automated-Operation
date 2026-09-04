@@ -9,6 +9,7 @@ import pytest
 from channel_operator.config import (
     AppConfig,
     ChannelGroupConfig,
+    DeliveryConfig,
     ReportingConfig,
 )
 
@@ -30,6 +31,10 @@ def app_config(tmp_path: Path):
         channel_groups=(group,),
         reporting=ReportingConfig(
             "123456:test-token", (123456789,), "测试服务器"
+        ),
+        delivery=DeliveryConfig(
+            staging_channel=-100999,
+            bot_session_path=tmp_path / "data" / "telegram-bot",
         ),
         keep_tags=("#必留",),
         drop_tags=("#删除",),

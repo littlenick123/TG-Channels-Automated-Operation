@@ -12,7 +12,7 @@ from .media import MediaProcessor
 from .models import GroupRunResult, RunSummary
 from .reporting import BotReporter
 from .service import AutomationService
-from .telegram import ChannelGroupUnavailable, TelegramGateway
+from .telegram import BotDeliveryGateway, ChannelGroupUnavailable, TelegramGateway
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,11 +40,13 @@ class MultiChannelRunner:
         telegram: TelegramGateway,
         media: MediaProcessor,
         reporter: BotReporter,
+        delivery: BotDeliveryGateway | None = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
     ):
         self.config = config
         self.telegram = telegram
+        self.delivery = delivery or telegram
         self.media = media
         self.reporter = reporter
         self.clock = clock
@@ -124,6 +126,9 @@ class MultiChannelRunner:
                 published = database.published_count(str(group.source_channel), run_date)
                 gateway = self.telegram.for_group(group)
                 await gateway.doctor()
+                delivery = self.delivery.for_group(group)
+                if self.delivery is not self.telegram:
+                    await delivery.doctor()
                 service = AutomationService(
                     self.config,
                     group,
@@ -131,6 +136,7 @@ class MultiChannelRunner:
                     gateway,
                     self.media,
                     self.reporter,
+                    delivery=delivery,
                 )
                 summary = await service.run_once(
                     continuous=continuous,

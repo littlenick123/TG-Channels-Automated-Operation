@@ -11,6 +11,9 @@ daily_time = "00:01"
 [reporting]
 chat_ids = [123456789]
 
+[delivery]
+staging_channel = -1001234567899
+
 [processing]
 ffmpeg_path = "ffmpeg"
 ffprobe_path = "ffprobe"
