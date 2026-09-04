@@ -248,9 +248,11 @@ class AutomationService:
             self.source_key, group.grouped_id, target_receipt
         )
         try:
-            await self.delivery.apply_caption(
+            verified_receipt = await self.delivery.apply_caption(
                 target_receipt, caption_html, caption_plain
             )
+            if verified_receipt is not None:
+                target_receipt = verified_receipt
         except Exception as exc:
             self.database.mark_caption_pending(
                 self.source_key, group.grouped_id, target_receipt, str(exc)
@@ -305,7 +307,11 @@ class AutomationService:
             group.staging_message_ids,
             group.staging_grouped_id or 0,
         )
-        if len(staging_receipt.message_ids) != 4 or staging_receipt.grouped_id <= 0:
+        if (
+            len(staging_receipt.message_ids) != 4
+            or not isinstance(staging_receipt.grouped_id, int)
+            or staging_receipt.grouped_id <= 0
+        ):
             raise StagingMediaUnavailable("数据库中的中转媒体组记录不完整")
         if group.status == "caption_pending" and group.destination_message_ids:
             target_receipt = DeliveryReceipt(
@@ -313,9 +319,11 @@ class AutomationService:
                 group.destination_grouped_id or 0,
             )
             try:
-                await self.delivery.apply_caption(
+                verified_receipt = await self.delivery.apply_caption(
                     target_receipt, caption_html, caption_plain
                 )
+                if verified_receipt is not None:
+                    target_receipt = verified_receipt
             except Exception as exc:
                 self.database.mark_caption_pending(
                     self.source_key, group.grouped_id, target_receipt, str(exc)
@@ -338,8 +346,7 @@ class AutomationService:
             continuous=continuous,
             delivery_started_at=(
                 group.delivery_started_at
-                if group.status
-                in {"delivering", "delivery_retryable", "caption_pending"}
+                if group.status == "delivering"
                 else None
             ),
             recovered=group.status

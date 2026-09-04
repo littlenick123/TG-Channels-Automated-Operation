@@ -208,7 +208,6 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"report_bot: @{bot_username}")
             print(f"report_server: {reporter.server_name}")
             print(f"staging_channel: {config.delivery.staging_channel}")
-            print(f"bot_session_path: {config.delivery.bot_session_path}")
             failed = False
             for group in groups:
                 database: StateDatabase | None = None

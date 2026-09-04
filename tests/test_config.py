@@ -56,9 +56,6 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.reporting.chat_ids == (123456789, 987654321)
     assert config.reporting.server_name == "德国-G12"
     assert config.delivery.staging_channel == -100999
-    assert config.delivery.bot_session_path == (
-        tmp_path / "data/telegram-bot"
-    ).resolve()
     assert config.download_concurrency == 4
     assert config.download_stall_timeout_seconds == 120
     assert config.download_low_speed_window_seconds == 60
@@ -641,32 +638,6 @@ def test_staging_channel_is_required(tmp_path: Path, monkeypatch):
         load_config(path)
 
 
-def test_bot_session_path_can_be_overridden(tmp_path: Path, monkeypatch):
-    path = tmp_path / "config.toml"
-    path.write_text(BASE_CONFIG, encoding="utf-8")
-    monkeypatch.setenv("TG_API_ID", "123")
-    monkeypatch.setenv("TG_API_HASH", "hash")
-    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
-    monkeypatch.setenv("TG_BOT_SESSION_PATH", "./sessions/delivery-bot")
-
-    config = load_config(path)
-
-    assert config.delivery.bot_session_path == (
-        tmp_path / "sessions/delivery-bot"
-    ).resolve()
-
-
-def test_user_and_bot_sessions_must_use_different_paths(tmp_path: Path, monkeypatch):
-    path = tmp_path / "config.toml"
-    path.write_text(BASE_CONFIG, encoding="utf-8")
-    monkeypatch.setenv("TG_API_ID", "123")
-    monkeypatch.setenv("TG_API_HASH", "hash")
-    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
-    monkeypatch.setenv("TG_SESSION_PATH", "./data/shared")
-    monkeypatch.setenv("TG_BOT_SESSION_PATH", "./data/shared")
-
-    with pytest.raises(ConfigError, match="不能使用同一路径"):
-        load_config(path)
 
 
 def test_report_server_name_defaults_to_system_hostname(tmp_path: Path, monkeypatch):

@@ -53,7 +53,7 @@
 - 每个频道组分别配置每日成功数量，并按唯一组名自动创建独立数据库。
 - 支持每日定时和频道组连续循环两种运行模式，共用同一个数量配置和数据库。
 - 频道被封、不可访问、无发帖权限或数据库异常时跳过当前频道组并继续后续组。
-- 同一个机器人使用 Telethon 负责目标频道分发，并使用 Bot API 向私人会话发送即时告警和最终汇总。
+- 同一个机器人使用官方 Bot API 负责目标频道分发，并向私人会话发送即时告警和最终汇总。
 - 最终汇总显示全部频道组从开始处理到全部完成或跳过的总耗时。
 - 使用全局进程锁防止两个任务同时运行。
 
@@ -134,7 +134,7 @@
 4. 保存 BotFather 返回的机器人 Token。
 5. 打开刚创建的机器人并发送 `/start`。
 
-同一个机器人同时负责发送运行报告和分发中转媒体。程序会为它建立独立的 Telethon Session，但仍复用 `TG_REPORT_BOT_TOKEN`，无需创建第二个机器人。
+同一个机器人同时负责发送运行报告和分发中转媒体。两项功能都复用 `TG_REPORT_BOT_TOKEN` 调用官方 Bot API，无需创建第二个机器人，也不需要机器人 Telethon Session。
 
 ### 3. 获取私人 chat ID
 
@@ -165,7 +165,7 @@ curl -sS -X POST "https://api.telegram.org/bot${TG_REPORT_BOT_TOKEN}/getUpdates"
 - 用户账号必须已经加入每一个源私密频道。
 - 用户账号必须可以读取源频道历史。
 - 用户账号必须加入私密中转频道，并具有发布消息权限。
-- 机器人必须加入私密中转频道，以便读取中转媒体历史。
+- 机器人必须加入私密中转频道，以便按已知消息 ID 复制中转媒体。
 - 机器人必须是每一个目标频道的管理员，并具有发布消息和编辑消息权限。
 - 主账号不需要加入目标频道；机器人不需要加入源频道。
 - 中转频道必须关闭“禁止保存内容/内容保护”，否则 Telegram 不允许机器人复制媒体。
@@ -231,7 +231,6 @@ TG_API_HASH=0123456789abcdef0123456789abcdef
 TG_PHONE=+8613800000000
 TG_SESSION_PATH=./data/telegram-user
 TG_REPORT_BOT_TOKEN=123456:ABCDEF_replace_me
-TG_BOT_SESSION_PATH=./data/telegram-bot
 TZ=Asia/Shanghai
 ```
 
@@ -244,14 +243,13 @@ TZ=Asia/Shanghai
 | `TG_PHONE` | 登录时建议 | `+8613800000000` | Telegram 用户账号手机号，使用带国家区号的 E.164 格式。 |
 | `TG_SESSION_PATH` | 建议显式设置 | `./data/telegram-user` | Telethon 用户会话路径；相对路径以 `config.toml` 所在目录为基准。通常不要手工添加 `.session` 后缀，父目录必须可写。 |
 | `TG_REPORT_BOT_TOKEN` | 是 | `123456:ABC...` | BotFather 提供的机器人 Token；同一机器人用于报告和目标频道分发。 |
-| `TG_BOT_SESSION_PATH` | 建议显式设置 | `./data/telegram-bot` | 分发机器人的独立 Telethon 会话路径，不能与 `TG_SESSION_PATH` 相同。 |
 | `TZ` | Docker 建议 | `Asia/Shanghai` | 设置容器日志时区；建议与 `[schedule] timezone` 保持一致。任务触发时间仍以 TOML 为准。 |
 
 注意事项：
 
 - `.env` 支持空行、以 `#` 开头的注释、引号和 `export KEY=value` 格式。
 - 如果系统环境中已经存在同名变量，系统环境变量优先，`.env` 不会覆盖它。
-- `.env`、`.session`、数据库和 Token 都不能提交到 Git。
+- `.env`、用户 `.session`、数据库和 Token 都不能提交到 Git。
 - Telethon 会话文件等同于登录凭据。泄露后应立即撤销相关会话。
 - 报告机器人 Token 泄露后应通过 BotFather 立即重新生成。
 
@@ -814,7 +812,7 @@ docker compose run --rm channel-operator \
 
 ### `login`
 
-初始化 Telethon 用户账号和分发机器人会话：
+初始化 Telethon 用户账号会话，并验证机器人 Token：
 
 ```bash
 .venv/bin/channel-operator --config config.toml login
@@ -825,7 +823,7 @@ docker compose run --rm channel-operator \
 - Telegram 登录验证码。
 - 开启两步验证时的密码。
 
-命令会先交互登录用户账号，再使用 `TG_REPORT_BOT_TOKEN` 自动登录机器人。完成后分别在 `TG_SESSION_PATH` 和 `TG_BOT_SESSION_PATH` 对应位置生成独立 `.session` 文件；机器人不需要验证码，也不需要第二个 Token。
+命令会先交互登录用户账号，然后使用 `TG_REPORT_BOT_TOKEN` 调用 Bot API `getMe` 验证机器人。只会在 `TG_SESSION_PATH` 对应位置生成用户 `.session` 文件；机器人不需要 Session 或验证码。
 
 ### `doctor`
 
@@ -845,10 +843,10 @@ docker compose run --rm channel-operator \
 
 - FFmpeg 和 FFprobe 是否可执行。
 - Telethon 用户会话是否已经登录。
-- 报告与分发机器人 Token、机器人身份及 Telethon 会话是否有效。
+- 报告与分发机器人 Token 及 Bot API 身份是否有效。
 - 报告机器人能否向所有私人 `chat_ids` 发送消息。
 - 用户账号能否读取源频道、访问中转频道并向中转频道发帖。
-- 中转频道是否关闭内容保护，机器人能否读取其历史。
+- 中转频道是否关闭内容保护，机器人是否仍在频道中。
 - 机器人是否能访问目标频道，并具有发帖和编辑消息权限。
 - 不检查也不要求用户账号访问目标频道。
 - 数据库目录是否可写。
@@ -1086,7 +1084,7 @@ channel_b.db-shm
 - 私密频道无法访问。
 - 频道 ID 无效或频道已删除。
 - 用户账号失去源频道读取权限或中转频道发帖权限。
-- 分发机器人无法读取中转频道，或中转频道开启内容保护。
+- 分发机器人无法访问或复制中转频道媒体，或中转频道开启内容保护。
 - 机器人被移出目标频道，或失去目标频道发帖/编辑权限。
 - 当前组数据库损坏、无法打开或身份不匹配。
 - 当前组发生未被素材级逻辑处理的异常。
@@ -1111,10 +1109,9 @@ channel_b.db-shm
 如果网络在 Telegram 已经接收媒体后、客户端收到响应前断开，盲目重试可能造成重复发帖：
 
 - 中转上传使用唯一 `route_id` 扫描中转频道；找到唯一四项媒体组后直接恢复。
-- 机器人分发使用中转媒体的 Telegram 媒体标识扫描目标频道近期媒体组。
-- 唯一匹配时保存目标消息 ID，并继续写入或校验正式文案。
-- 没有匹配时按 `retry_delays_seconds` 重试；中转成功后无需重新下载或转码。
-- 找到多个匹配项时标记为 `delivery_uncertain`，暂停当前频道组并发送人工核对告警。
+- Bot API `copyMessages` 成功时会返回四个目标消息 ID，程序立即持久化后再编辑首条视频文案。
+- Bot API 机器人不能调用 Telegram 频道历史扫描方法。如果复制请求的结果因读取超时、无效响应或服务端异常无法确认，程序会标记 `delivery_uncertain`、暂停当前频道组并告警，不会自动重复复制。
+- Telegram 明确返回限流或未执行的失败时，仍按重试配置处理；中转成功后无需重新下载或转码。
 - 如果媒体已复制但正式文案写入失败，状态保存为 `caption_pending`，以后只重试编辑文案，不重复复制媒体。
 
 ### 下载续传
@@ -1138,7 +1135,7 @@ channel_b.db-shm
 ├── compose.yaml             # 容器、资源、挂载和日志设置
 ├── config.toml              # 实际运行配置，不提交 Git
 ├── .env                     # Telegram 凭据，不提交 Git
-├── data/                    # Telethon Session 和各频道组 SQLite
+├── data/                    # 用户 Telethon Session 和各频道组 SQLite
 ├── work/                    # 下载、转码、截图和全局进程锁
 ├── deploy/
 │   └── config.production.toml
@@ -1239,7 +1236,6 @@ TG_API_HASH=替换为真实API_HASH
 TG_PHONE=+8613800000000
 TG_SESSION_PATH=./data/telegram-user
 TG_REPORT_BOT_TOKEN=替换为真实机器人Token
-TG_BOT_SESSION_PATH=./data/telegram-bot
 TZ=Asia/Shanghai
 ```
 
@@ -1275,7 +1271,7 @@ work_dir = "./work"
 | `./data` | `/app/data` | 读写 | Session 与 SQLite |
 | `./work` | `/app/work` | 读写 | 临时媒体和进程锁 |
 
-重建或更新容器不会删除 `data/`，因此不会丢失用户 Session、机器人 Session、索引和发布记录。`work/` 里的单个媒体临时目录仍由程序在处理结束时清理。
+重建或更新容器不会删除 `data/`，因此不会丢失用户 Session、频道索引和发布记录。`work/` 里的单个媒体临时目录仍由程序在处理结束时清理。
 
 默认资源：
 
@@ -1511,11 +1507,7 @@ docker compose up -d --remove-orphans
 staging_channel = -1001234567899
 ```
 
-```dotenv
-TG_BOT_SESSION_PATH=./data/telegram-bot
-```
-
-把主账号加入中转频道并授予发帖权限，把现有机器人加入中转频道和所有目标频道；目标频道授予机器人发帖、编辑消息权限。升级后先重新执行 `login` 创建机器人 Session，再运行 `doctor`。确认一个真实测试媒体组完成“上传中转 → 机器人分发 → 写入正式文案”后，主账号才可以退出目标频道。数据库会自动增加中转和分发字段，不需要删除、迁移或重新索引。
+把主账号加入中转频道并授予发帖权限，把现有机器人加入中转频道和所有目标频道；目标频道授予机器人发帖、编辑消息权限。升级后重新执行 `login` 验证用户 Session 和机器人 Token，再运行 `doctor`。确认一个真实测试媒体组完成“上传中转 → 机器人分发 → 写入正式文案”后，主账号才可以退出目标频道。机器人分发直接使用 Bot API，不再创建第二份 Telethon Session。数据库会自动增加中转和分发字段，不需要删除、迁移或重新索引。
 
 如果显示 `Already up to date.`，说明远程仓库没有更新提交，需要先在开发机器提交并推送。
 
@@ -1556,8 +1548,8 @@ docker image prune
 服务器迁移时，不需要复制整个旧系统或 Docker 容器。新服务器从 Git 仓库重新取得源码并重新构建镜像，只需从旧服务器迁移以下运行数据：
 
 - `config.toml`：频道组、媒体处理和运行参数。
-- `.env`：Telegram API 凭据、报告/分发机器人令牌以及用户与机器人 Session 路径等敏感变量。
-- `data/`：用户和机器人 Telethon Session、各频道组 SQLite 数据库及其发布状态。
+- `.env`：Telegram API 凭据、报告/分发机器人令牌以及用户 Session 路径等敏感变量。
+- `data/`：用户 Telethon Session、各频道组 SQLite 数据库及其发布状态。
 
 通常不要迁移以下内容：
 
@@ -1568,7 +1560,7 @@ docker image prune
 
 迁移 `data/` 后，已发布素材、当天成功数量、索引进度和失败状态都会保留。同一天在新服务器启动时，程序只会补足尚未完成的数量，不会从零重新计算。
 
-> **重要：**旧服务器与新服务器不能同时运行同一份 Telethon Session 和频道数据库，否则可能导致重复发布、SQLite 写入冲突或 Telegram 会话异常。迁移期间必须先停止旧服务器，确认新服务器正常后再决定是否退役旧服务器。
+> **重要：**旧服务器与新服务器不能同时运行同一份用户 Telethon Session 和频道数据库，否则可能导致重复发布、SQLite 写入冲突或 Telegram 会话异常。迁移期间必须先停止旧服务器，确认新服务器正常后再决定是否退役旧服务器。
 
 ### 1. 在旧服务器等待当前媒体组完成
 
@@ -1758,7 +1750,7 @@ docker compose logs -f --tail=100 channel-operator
 - `retryable`：以后仍允许重新尝试。
 - 下载或转码中断：临时文件不迁移，新服务器会重新下载或处理。
 - `staged`、`delivery_retryable`：直接使用永久保留的中转媒体继续分发，不重新下载和转码。
-- `delivering`：机器人先核对目标频道近期媒体组，再决定是否重试复制。
+- `delivering`：表示上次 Bot API 复制在保存目标消息 ID 前中断；程序会暂停该组并要求人工核对，不会冒险重复复制。
 - `caption_pending`：只重试目标第一条视频的正式文案，不重复复制媒体。
 - 旧版 `uploading`：如果主账号仍可访问目标频道则先核对；否则停止自动重发并告警，避免重复。
 
@@ -2003,7 +1995,7 @@ docker compose logs --tail=200 channel-operator
 
 - 不要提交 `.env`、真实 `config.toml`、`.session`、SQLite 数据库和工作目录。
 - `.env` 和真实 `config.toml` 建议使用 `root:root` 和 `600`。
-- 用户和机器人两个 Telethon Session 都建议使用权限 `600`，所有者为 root，且不能共用同一路径。
+- 用户 Telethon Session 建议使用权限 `600`，所有者为 root。
 - 不要在日志、截图、Issue 或聊天中暴露 API Hash、Bot Token 或 Session 文件。
 - 项目会关闭 HTTPX/httpcore 的请求 URL 日志，避免 Bot Token 出现在 Bot API URL 日志中。
 - 数据库包含中转/目标消息 ID、处理状态和文案，不应公开。

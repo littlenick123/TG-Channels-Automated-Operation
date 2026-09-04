@@ -294,6 +294,13 @@ class StateDatabase:
             value = row[column]
             return tuple(int(item) for item in json.loads(value)) if value else ()
 
+        def grouped_id(column: str) -> int | str | None:
+            value = row[column]
+            if value is None:
+                return None
+            text = str(value)
+            return int(text) if text.isdecimal() else text
+
         return MediaGroup(
             source_channel=row["source_channel"],
             grouped_id=int(row["grouped_id"]),
@@ -320,11 +327,7 @@ class StateDatabase:
             staged_at=row["staged_at"],
             delivery_started_at=row["delivery_started_at"],
             destination_message_ids=message_ids("destination_message_ids"),
-            destination_grouped_id=(
-                int(row["destination_grouped_id"])
-                if row["destination_grouped_id"] is not None
-                else None
-            ),
+            destination_grouped_id=grouped_id("destination_grouped_id"),
             caption_applied=bool(row["caption_applied"]),
         )
 
@@ -711,7 +714,7 @@ class StateDatabase:
         source_channel: str,
         grouped_id: int,
         destination_message_ids: list[int],
-        destination_grouped_id: int,
+        destination_grouped_id: int | str,
         published_date: str,
     ) -> None:
         now = datetime.now(UTC).isoformat()

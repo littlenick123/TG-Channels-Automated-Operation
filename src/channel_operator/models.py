@@ -46,7 +46,7 @@ class MediaGroup:
     staged_at: str | None = None
     delivery_started_at: str | None = None
     destination_message_ids: tuple[int, ...] = ()
-    destination_grouped_id: int | None = None
+    destination_grouped_id: int | str | None = None
     caption_applied: bool = False
 
 
@@ -111,7 +111,7 @@ class DailyStats:
 @dataclass(frozen=True, slots=True)
 class DeliveryReceipt:
     message_ids: tuple[int, ...]
-    grouped_id: int
+    grouped_id: int | str
 
 
 @dataclass(frozen=True, slots=True)

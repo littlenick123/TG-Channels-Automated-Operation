@@ -101,7 +101,6 @@ class ReportingConfig:
 @dataclass(frozen=True, slots=True)
 class DeliveryConfig:
     staging_channel: str | int
-    bot_session_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,10 +353,6 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         ),
         delivery=DeliveryConfig(
             staging_channel=staging_channel,
-            bot_session_path=_resolve_path(
-                base,
-                os.getenv("TG_BOT_SESSION_PATH", "./data/telegram-bot"),
-            ),
         ),
         keep_tags=keep_tags,
         drop_tags=drop_tags,
@@ -410,8 +405,6 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             "以下频道组的 daily_success_count 超过 max_candidates_per_run："
             + ", ".join(oversized_groups)
         )
-    if config.session_path == config.delivery.bot_session_path:
-        raise ConfigError("TG_SESSION_PATH 与 TG_BOT_SESSION_PATH 不能使用同一路径")
     if not 1 <= config.ffmpeg_threads <= 4:
         raise ConfigError("4C VPS 的 ffmpeg_threads 必须在 1 到 4 之间")
     if not 0 <= config.crf <= 51:
