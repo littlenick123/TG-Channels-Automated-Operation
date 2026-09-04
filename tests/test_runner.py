@@ -189,7 +189,6 @@ async def test_runner_processes_groups_strictly_in_configuration_order(app_confi
         "transcode:channel_b",
         "send:channel_b",
         "doctor:channel_c",
-        "scan:channel_c",
         "download:channel_c",
         "transcode:channel_c",
         "send:channel_c",

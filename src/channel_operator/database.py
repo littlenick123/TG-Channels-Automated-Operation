@@ -232,15 +232,37 @@ class StateDatabase:
                 (f"checkpoint:{source_channel}", str(checkpoint)),
             )
 
-    def refresh_groups(self, source_channel: str) -> int:
-        rows = self.connection.execute(
-            """
-            SELECT * FROM source_messages
-            WHERE source_channel = ?
-            ORDER BY grouped_id, message_id
-            """,
-            (source_channel,),
-        ).fetchall()
+    def refresh_groups(
+        self, source_channel: str, grouped_ids: set[int] | None = None
+    ) -> int:
+        if grouped_ids is not None and not grouped_ids:
+            return self.media_group_count(source_channel)
+        if grouped_ids is None:
+            rows = self.connection.execute(
+                """
+                SELECT * FROM source_messages
+                WHERE source_channel = ?
+                ORDER BY grouped_id, message_id
+                """,
+                (source_channel,),
+            ).fetchall()
+        else:
+            rows = []
+            ordered_ids = sorted(grouped_ids)
+            for offset in range(0, len(ordered_ids), 500):
+                batch = ordered_ids[offset : offset + 500]
+                placeholders = ",".join("?" for _ in batch)
+                rows.extend(
+                    self.connection.execute(
+                        f"""
+                        SELECT * FROM source_messages
+                        WHERE source_channel = ?
+                          AND CAST(grouped_id AS INTEGER) IN ({placeholders})
+                        ORDER BY grouped_id, message_id
+                        """,
+                        (source_channel, *batch),
+                    ).fetchall()
+                )
         grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for row in rows:
             grouped[row["grouped_id"]].append(row)
@@ -287,7 +309,14 @@ class StateDatabase:
                         now,
                     ),
                 )
-        return len(grouped)
+        return self.media_group_count(source_channel)
+
+    def media_group_count(self, source_channel: str) -> int:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM media_groups WHERE source_channel = ?",
+            (source_channel,),
+        ).fetchone()
+        return int(row["count"])
 
     def _to_group(self, row: sqlite3.Row) -> MediaGroup:
         def message_ids(column: str) -> tuple[int, ...]:

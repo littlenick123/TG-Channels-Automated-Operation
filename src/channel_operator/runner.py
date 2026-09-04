@@ -8,6 +8,7 @@ from datetime import datetime
 
 from .config import AppConfig, ChannelGroupConfig
 from .database import DatabaseIdentityError, StateDatabase
+from .indexing import SourceIndexCoordinator
 from .media import MediaProcessor
 from .models import GroupRunResult, RunSummary
 from .reporting import BotReporter
@@ -92,6 +93,7 @@ class MultiChannelRunner:
         started_at = self.clock()
         results: list[GroupRunResult] = []
         paused = paused_groups if paused_groups is not None else {}
+        indexer = SourceIndexCoordinator(self.config)
         for group in groups:
             if continuous and group.name in paused:
                 reason = paused[group.name]
@@ -129,6 +131,7 @@ class MultiChannelRunner:
                 delivery = self.delivery.for_group(group)
                 if self.delivery is not self.telegram:
                     await delivery.doctor()
+                await indexer.prepare_group(group, database, gateway)
                 service = AutomationService(
                     self.config,
                     group,
@@ -141,6 +144,7 @@ class MultiChannelRunner:
                 summary = await service.run_once(
                     continuous=continuous,
                     safe_point=safe_point,
+                    index_before_run=False,
                 )
                 results.append(GroupRunResult(group=group, summary=summary))
                 LOGGER.info(
@@ -197,6 +201,7 @@ class MultiChannelRunner:
                     database.close()
             if safe_point is not None:
                 await safe_point()
+        indexer.close()
         elapsed_seconds = max(0.0, self.clock() - started_at)
         completed_at = self.now()
         run_date = completed_at.date().isoformat()

@@ -88,17 +88,14 @@ def _parse_source(text: str) -> tuple[list[str], str | None]:
     return list(unique.values()), source_intro
 
 
-def build_caption(
-    source: str,
+def _select_tags(
+    source_tags: Sequence[str],
     keep_tags: Sequence[str],
     drop_tags: Sequence[str],
     *,
-    intro_footer: str = "",
-    limit: int = 1024,
     random_source: secrets.SystemRandom | None = None,
-) -> CaptionResult:
+) -> tuple[str, ...]:
     rng = random_source or secrets.SystemRandom()
-    source_tags, source_intro = _parse_source(source)
     source_by_key = {normalize_tag(tag): tag for tag in source_tags}
     dropped = {normalize_tag(tag) for tag in drop_tags}
 
@@ -117,7 +114,15 @@ def build_caption(
     ]
     count = min(max(0, 5 - len(prioritized)), len(remaining))
     sampled = rng.sample(remaining, count) if count else []
-    selected = (prioritized + sampled)[:5]
+    return tuple((prioritized + sampled)[:5])
+
+
+def _render_caption(
+    selected: Sequence[str],
+    source_intro: str | None,
+    footer: str,
+    limit: int,
+) -> CaptionResult:
     fitted: list[str] = []
     for tag in selected:
         candidate = " ".join([*fitted, tag])
@@ -126,7 +131,6 @@ def build_caption(
     chosen = tuple(fitted)
 
     tag_line = " ".join(chosen)
-    footer = intro_footer.strip()
     separator = "\n" if tag_line and (source_intro or footer) else ""
     available = limit - _utf16_length(tag_line) - _utf16_length(separator)
 
@@ -165,4 +169,62 @@ def build_caption(
         plain=plain,
         tags=chosen,
         intro=block_plain or None,
+    )
+
+
+def build_caption(
+    source: str,
+    keep_tags: Sequence[str],
+    drop_tags: Sequence[str],
+    *,
+    intro_footer: str = "",
+    limit: int = 1024,
+    random_source: secrets.SystemRandom | None = None,
+) -> CaptionResult:
+    source_tags, source_intro = _parse_source(source)
+    selected = _select_tags(
+        source_tags,
+        keep_tags,
+        drop_tags,
+        random_source=random_source,
+    )
+    return _render_caption(selected, source_intro, intro_footer.strip(), limit)
+
+
+def build_staging_caption(
+    source: str,
+    selected_tags: Sequence[str],
+    *,
+    intro_footer: str,
+    route_text: str,
+    limit: int = 1024,
+) -> CaptionResult:
+    """Render a staging-only caption while reserving space for routing data."""
+    route = route_text.strip()
+    if not route:
+        raise ValueError("中转路由信息不能为空")
+    route_units = _utf16_length(route)
+    if route_units > limit:
+        raise ValueError("中转路由信息超过 Telegram caption 长度限制")
+
+    _, source_intro = _parse_source(source)
+    separator = "\n\n"
+    available = max(0, limit - route_units - _utf16_length(separator))
+    formal = _render_caption(
+        selected_tags,
+        source_intro,
+        intro_footer.strip(),
+        available,
+    )
+    if formal.plain:
+        plain = f"{formal.plain}{separator}{route}"
+        caption_html = f"{formal.html}{separator}{html.escape(route)}"
+    else:
+        plain = route
+        caption_html = html.escape(route)
+    return CaptionResult(
+        html=caption_html,
+        plain=plain,
+        tags=formal.tags,
+        intro=formal.intro,
     )

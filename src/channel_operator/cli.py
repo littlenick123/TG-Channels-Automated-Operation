@@ -6,6 +6,7 @@ import logging
 
 from .config import AppConfig, ChannelGroupConfig, ConfigError, load_config
 from .database import StateDatabase
+from .indexing import SourceIndexCoordinator, canonical_source_key
 from .locking import AlreadyRunningError, ProcessLock
 from .media import MediaProcessor
 from .reporting import BotReporter, ReporterError
@@ -209,6 +210,8 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"report_server: {reporter.server_name}")
             print(f"staging_channel: {config.delivery.staging_channel}")
             failed = False
+            checked_source_indexes: set[str] = set()
+            source_indexes = SourceIndexCoordinator(config)
             for group in groups:
                 database: StateDatabase | None = None
                 try:
@@ -219,6 +222,16 @@ async def _run(arguments: argparse.Namespace) -> int:
                     for name, value in checks.items():
                         print(f"{name}: {value}")
                     print(f"database: {group.database_path}")
+                    source_key = canonical_source_key(group.source_channel)
+                    if source_key not in checked_source_indexes:
+                        index_path, checkpoint, message_count = source_indexes.details(
+                            group.source_channel
+                        )
+                        print(f"source_index: {index_path}")
+                        print(f"source_index_checkpoint: {checkpoint}")
+                        print(f"source_index_messages: {message_count}")
+                        print("source_index_status: read-write-ok")
+                        checked_source_indexes.add(source_key)
                 except Exception as exc:
                     failed = True
                     logging.exception("频道组 %s 检查失败", group.display_name)
@@ -236,20 +249,17 @@ async def _run(arguments: argparse.Namespace) -> int:
         with ProcessLock(lock_path):
             if arguments.command == "index":
                 failed = False
+                source_indexes = SourceIndexCoordinator(config)
                 for group in groups:
                     database: StateDatabase | None = None
                     try:
                         database = _database(group)
-                        service = AutomationService(
-                            config,
+                        gateway = telegram.for_group(group)
+                        count = await source_indexes.prepare_group(
                             group,
                             database,
-                            telegram.for_group(group),
-                            media,
-                            reporter,
-                            delivery=delivery.for_group(group),
+                            gateway,
                         )
-                        count = await service.index()
                         print(
                             f"[{group.display_name}] 索引完成，共 {count} 个媒体组"
                         )
@@ -260,24 +270,29 @@ async def _run(arguments: argparse.Namespace) -> int:
                     finally:
                         if database is not None:
                             database.close()
+                source_indexes.close()
                 return 2 if failed else 0
             if arguments.dry_run:
                 failed = False
+                source_indexes = SourceIndexCoordinator(config)
                 for group in groups:
                     database: StateDatabase | None = None
                     try:
                         database = _database(group)
+                        gateway = telegram.for_group(group)
+                        await source_indexes.prepare_group(group, database, gateway)
                         service = AutomationService(
                             config,
                             group,
                             database,
-                            telegram.for_group(group),
+                            gateway,
                             media,
                             reporter,
                             delivery=delivery.for_group(group),
                         )
                         previews = await service.dry_run(
-                            continuous=config.schedule_mode == "continuous"
+                            continuous=config.schedule_mode == "continuous",
+                            index_before_run=False,
                         )
                         print(f"\n[{group.display_name}]")
                         if not previews:
@@ -291,6 +306,7 @@ async def _run(arguments: argparse.Namespace) -> int:
                     finally:
                         if database is not None:
                             database.close()
+                source_indexes.close()
                 return 2 if failed else 0
             runner = MultiChannelRunner(
                 config, telegram, media, reporter, delivery=delivery

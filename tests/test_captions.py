@@ -4,7 +4,7 @@ import pytest
 from telethon.extensions import html as telethon_html
 from telethon.tl.types import MessageEntityBlockquote, MessageEntityBold
 
-from channel_operator.captions import build_caption
+from channel_operator.captions import build_caption, build_staging_caption
 
 
 class FirstRandom:
@@ -258,3 +258,40 @@ def test_ascii_colon_and_multiple_tag_lines_are_supported():
     result = build_caption(source, [], [], random_source=FirstRandom())
 
     assert result.tags == ("#甲", "#乙", "#丙", "#丁")
+
+
+def test_staging_caption_combines_formal_caption_and_route():
+    source = "标签：#甲 #乙\n简介：中转频道简介"
+    target = build_caption(source, [], [], random_source=FirstRandom())
+
+    staging = build_staging_caption(
+        source,
+        target.tags,
+        intro_footer="追加内容",
+        route_text="#channel_a\nroute_id=channel_a:-100111:123",
+    )
+
+    assert staging.plain == (
+        "#甲 #乙\n中转频道简介\n追加内容\n\n"
+        "#channel_a\nroute_id=channel_a:-100111:123"
+    )
+    parsed_text, _ = telethon_html.parse(staging.html)
+    assert parsed_text == staging.plain
+
+
+def test_staging_caption_reserves_route_without_shortening_target_caption():
+    source = "标签：#甲\n简介：" + "内容" * 600
+    target = build_caption(source, [], [], limit=1024, random_source=FirstRandom())
+    route = "#channel_a\nroute_id=channel_a:-100111:123"
+
+    staging = build_staging_caption(
+        source,
+        target.tags,
+        intro_footer="",
+        route_text=route,
+    )
+
+    assert len(target.plain.encode("utf-16-le")) // 2 == 1024
+    assert len(staging.plain.encode("utf-16-le")) // 2 <= 1024
+    assert staging.plain.endswith(f"...\n\n{route}")
+    assert target.plain.endswith("...")

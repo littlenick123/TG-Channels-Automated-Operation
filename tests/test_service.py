@@ -190,6 +190,7 @@ async def test_run_once_publishes_one_four_item_album_and_cleans_workdir(app_con
     assert summary.published == 1
     assert telegram.sent_files == ["video.mp4", "frame_1.jpg", "frame_2.jpg", "frame_3.jpg"]
     assert telegram.sent_caption.startswith("<b>#必留")
+    assert "#test_group\nroute_id=test_group:-100111:123" in telegram.sent_caption
     assert telegram.sent_thumbnail == "video_thumb.jpg"
     assert telegram.sent_video_info.display_width == 1280
     assert telegram.sent_video_info.display_height == 720

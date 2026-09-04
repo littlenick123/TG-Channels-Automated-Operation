@@ -64,7 +64,7 @@ disk_reserve_bytes = 1073741824
 
 # 数据目录、运行限制、下载并发和重试参数
 [runtime]
-# 频道组 SQLite 数据库和持久状态目录
+# 频道组数据库及 source_indexes 共享源索引的持久状态目录
 database_dir = "./data"
 # 下载、转码、截图和进程锁的临时工作目录
 work_dir = "./work"

@@ -644,7 +644,7 @@ class TelegramGateway:
     async def send_staging_album(
         self,
         files: list[Path],
-        caption_html: str,
+        staging_caption_html: str,
         route_id: str,
         upload_started_at: str,
         *,
@@ -654,7 +654,6 @@ class TelegramGateway:
         if len(files) != 4:
             raise TelegramError("中转媒体组必须恰好包含 1 个视频和 3 张图片")
         staging = await self._staging_entity()
-        route_caption = f"#{self._require_group().name}\nroute_id={route_id}"
 
         async def operation() -> Any:
             uploaded_video = await self.client.upload_file(str(files[0]))
@@ -678,7 +677,7 @@ class TelegramGateway:
             return await self.client.send_file(
                 staging,
                 [video_media, *(str(path) for path in files[1:])],
-                caption=[caption_html, "", "", route_caption],
+                caption=[staging_caption_html, "", "", ""],
                 parse_mode="html",
                 supports_streaming=True,
             )
@@ -764,7 +763,7 @@ class TelegramGateway:
                 and videos == 1
                 and photos == 3
                 and self._video_metadata(ordered[0])[0]
-                and marker in str(ordered[-1].raw_text or "")
+                and any(marker in str(message.raw_text or "") for message in ordered)
             ):
                 matches.append(self._receipt_from_album(ordered, "中转恢复检查"))
         if len(matches) > 1:

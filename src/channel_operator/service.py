@@ -10,7 +10,7 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
-from .captions import build_caption
+from .captions import build_caption, build_staging_caption
 from .config import AppConfig, ChannelGroupConfig
 from .database import StateDatabase
 from .media import InvalidSourceMedia, MediaProcessor
@@ -119,8 +119,11 @@ class AutomationService:
     def _record_stats(self, *, stats_date: str | None = None, **values: int) -> None:
         self.database.record_daily_stats(stats_date or self._today(), **values)
 
-    async def dry_run(self, *, continuous: bool = False) -> list[tuple[int, str]]:
-        await self.index()
+    async def dry_run(
+        self, *, continuous: bool = False, index_before_run: bool = True
+    ) -> list[tuple[int, str]]:
+        if index_before_run:
+            await self.index()
         today = self._today()
         candidates = self.database.preview_candidates(
             self.source_key,
@@ -396,10 +399,17 @@ class AutomationService:
                 caption.html,
                 caption.plain,
             )
+            route_id = self._route_id(group)
+            staging_caption = build_staging_caption(
+                group.caption,
+                caption.tags,
+                intro_footer=self.intro_footer,
+                route_text=f"#{self.group.name}\nroute_id={route_id}",
+            )
             staging_receipt = await self.telegram.send_staging_album(
                 [output, *frames],
-                caption.html,
-                self._route_id(group),
+                staging_caption.html,
+                route_id,
                 upload_started_at,
                 video_info=output_info,
                 thumbnail=thumbnail,
@@ -426,8 +436,10 @@ class AutomationService:
         *,
         continuous: bool = False,
         safe_point: Callable[[], Awaitable[None]] | None = None,
+        index_before_run: bool = True,
     ) -> RunSummary:
-        await self.index()
+        if index_before_run:
+            await self.index()
         run_date = self._today()
         summary = RunSummary(
             run_date=run_date,

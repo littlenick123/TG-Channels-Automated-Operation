@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -74,6 +75,42 @@ class UploadRuntimeErrorClient(FakeClient):
 class PrivateChannelClient(FakeClient):
     async def get_entity(self, entity):
         raise errors.ChannelPrivateError(request=None)
+
+
+class StagingHistoryClient(FakeClient):
+    def __init__(self, route_index: int):
+        super().__init__()
+        route = "#test_group\nroute_id=test_group:-100111:123"
+        video = SimpleNamespace(
+            attributes=[DocumentAttributeVideo(duration=60, w=1280, h=720)]
+        )
+        now = datetime.now(UTC)
+        self.messages = [
+            SimpleNamespace(
+                id=10,
+                grouped_id=777,
+                raw_text=route if route_index == 0 else "正式文案",
+                date=now,
+                video=video,
+                photo=None,
+            ),
+            *[
+                SimpleNamespace(
+                    id=message_id,
+                    grouped_id=777,
+                    raw_text=route if route_index == index else "",
+                    date=now,
+                    video=None,
+                    photo=SimpleNamespace(id=message_id),
+                )
+                for index, message_id in enumerate(range(11, 14), start=1)
+            ],
+        ]
+
+    async def iter_messages(self, entity, limit):
+        del entity, limit
+        for message in reversed(self.messages):
+            yield message
 
 
 class ResumableDownloadClient(FakeClient):
@@ -535,7 +572,7 @@ async def test_private_channel_error_is_promoted_to_group_failure(app_config):
 
 
 @pytest.mark.asyncio
-async def test_staging_album_keeps_official_caption_and_route_on_last_photo(
+async def test_staging_album_puts_combined_caption_only_on_video(
     app_config, tmp_path: Path
 ):
     client = FakeClient()
@@ -545,7 +582,7 @@ async def test_staging_album_keeps_official_caption_and_route_on_last_photo(
 
     receipt = await gateway.send_staging_album(
         files,
-        "<b>#标签</b>",
+        "<b>#标签</b>\n\n#test_group\nroute_id=test_group:-100111:123",
         "test_group:-100111:123",
         "2026-08-10T00:00:00+00:00",
         video_info=video_info,
@@ -556,11 +593,30 @@ async def test_staging_album_keeps_official_caption_and_route_on_last_photo(
     entity, _, options = client.calls[0]
     assert entity == config.delivery.staging_channel
     assert options["caption"] == [
-        "<b>#标签</b>",
+        "<b>#标签</b>\n\n#test_group\nroute_id=test_group:-100111:123",
         "",
         "",
-        "#test_group\nroute_id=test_group:-100111:123",
+        "",
     ]
+
+
+@pytest.mark.parametrize("route_index", [0, 3])
+@pytest.mark.asyncio
+async def test_staging_recovery_accepts_new_and_legacy_route_positions(
+    app_config, route_index
+):
+    config = app_config()
+    gateway = TelegramGateway(
+        config,
+        config.channel_groups[0],
+        client=StagingHistoryClient(route_index),
+    )
+
+    receipt = await gateway.find_matching_staging_album(
+        "2026-08-10T00:00:00+00:00", "test_group:-100111:123"
+    )
+
+    assert receipt == DeliveryReceipt((10, 11, 12, 13), 777)
 
 
 class BotApiResponse:
