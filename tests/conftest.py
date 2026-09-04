@@ -46,6 +46,8 @@ def app_config(tmp_path: Path):
         preset="ultrafast",
         audio_bitrate="128k",
         output_height=720,
+        watermark_text="",
+        watermark_font_file=tmp_path / "watermark-font.ttf",
         minimum_source_short_edge=1080,
         album_settle_seconds=0,
         disk_reserve_bytes=0,
@@ -78,6 +80,9 @@ def app_config(tmp_path: Path):
         }
         if group_intro_footer is not unset:
             group_fields["intro_footer"] = group_intro_footer
+        group_watermark_text = changes.pop("group_watermark_text", unset)
+        if group_watermark_text is not unset:
+            group_fields["watermark_text"] = group_watermark_text
         selected_group = replace(group, **group_fields)
         return replace(config, channel_groups=(selected_group,), **changes)
 

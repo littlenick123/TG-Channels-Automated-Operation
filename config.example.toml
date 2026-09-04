@@ -46,6 +46,10 @@ preset = "medium"
 audio_bitrate = "128k"
 # 输出视频的目标短边高度；480 对应横屏约854×480、竖屏约480×854
 output_height = 480
+# 全局默认视频水印；显示在截取后成片的最后10秒，空字符串表示关闭
+watermark_text = "更多精彩内容请关注频道"
+# 视频水印使用的中文字体；Docker 镜像已安装此字体
+watermark_font_file = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 # 源视频短边最低像素，默认只处理1080P及以上
 minimum_source_short_edge = 1080
 # 新媒体组等待完整到达后才允许处理的秒数
@@ -84,6 +88,7 @@ name = "channel_b"
 remark = "欧美中文字幕"
 # 本频道组专属追加文字；会覆盖全局设置
 intro_footer = "点击频道名称查看更多内容"
+# 未配置 watermark_text 时继承全局视频水印
 # 源频道数字 ID 或用户名
 source_channel = -1001234567890
 # 目标频道数字 ID 或用户名
@@ -99,6 +104,8 @@ name = "channel_c"
 remark = "欧美精选"
 # 本频道组不追加固定文字；空字符串也可关闭非空的全局默认值
 intro_footer = ""
+# 空字符串会关闭本频道组的视频水印
+watermark_text = ""
 # 多个频道组可以共用同一个源频道
 source_channel = -1001234567890
 # 每个目标频道使用独立频道组数据库

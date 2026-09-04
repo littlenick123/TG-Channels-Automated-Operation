@@ -26,7 +26,7 @@ ENV VIRTUAL_ENV=/opt/venv \
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates ffmpeg tzdata \
+        ca-certificates ffmpeg fonts-noto-cjk tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/data /app/work
 

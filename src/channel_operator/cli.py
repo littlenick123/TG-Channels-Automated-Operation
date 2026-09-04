@@ -163,6 +163,24 @@ async def _run(arguments: argparse.Namespace) -> int:
             print(f"daily_time: {config.daily_time}")
             print(f"continuous_idle_seconds: {config.continuous_idle_seconds}")
             print(f"output_height: {config.output_height}")
+            watermark_groups = [
+                group
+                for group in groups
+                if (
+                    config.watermark_text
+                    if group.watermark_text is None
+                    else group.watermark_text
+                )
+            ]
+            if watermark_groups:
+                await media.check_watermark_support()
+                print(f"watermark_font_file: {config.watermark_font_file}")
+                print(
+                    "watermark_enabled_groups: "
+                    + ", ".join(group.name for group in watermark_groups)
+                )
+            else:
+                print("watermark_enabled_groups: none")
             print(f"download_concurrency: {config.download_concurrency}")
             print(
                 "download_stall_timeout_seconds: "

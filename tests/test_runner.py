@@ -98,11 +98,15 @@ class FakeMedia:
     def validate_source(self, info):
         return None
 
-    async def transcode(self, source, destination, info):
+    async def cut_first_third(self, source, destination, info):
+        destination.write_bytes(b"clipped")
+        return VideoInfo(destination, 60, 1920, 1080, has_audio=True)
+
+    async def transcode(self, source, destination, info, *, watermark_text=""):
         group_name = destination.parent.parent.name
         self.events.append(f"transcode:{group_name}")
         destination.write_bytes(b"video")
-        return VideoInfo(destination, 180, 1280, 720, has_audio=True)
+        return VideoInfo(destination, 60, 1280, 720, has_audio=True)
 
     async def screenshots(self, video, duration, directory):
         paths = []

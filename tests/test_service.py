@@ -106,6 +106,7 @@ class SlowFirstDownloadTelegram(FakeTelegram):
 class FakeMedia:
     def __init__(self, config):
         self.config = config
+        self.watermark_texts = []
 
     def check_disk(self, source_size):
         return None
@@ -116,9 +117,15 @@ class FakeMedia:
     def validate_source(self, info):
         return None
 
-    async def transcode(self, source, destination, info):
+    async def cut_first_third(self, source, destination, info):
+        destination.write_bytes(b"clipped")
+        return VideoInfo(destination, 60, 1920, 1080, has_audio=False)
+
+    async def transcode(self, source, destination, info, *, watermark_text=""):
+        assert source.name == "source_first_third.mkv"
+        self.watermark_texts.append(watermark_text)
         destination.write_bytes(b"video")
-        return VideoInfo(destination, 180, 1280, 720, has_audio=False)
+        return VideoInfo(destination, 60, 1280, 720, has_audio=False)
 
     async def screenshots(self, video, duration, directory):
         frames = []
@@ -130,7 +137,7 @@ class FakeMedia:
 
     async def thumbnail(self, video, duration, destination):
         assert video.name == "video.mp4"
-        assert duration == 180
+        assert duration == 60
         destination.write_bytes(b"thumbnail")
         return destination
 
@@ -311,6 +318,57 @@ async def test_channel_group_intro_footer_overrides_or_inherits_global_value(
     previews = await service.dry_run()
 
     assert previews == [(123, expected_caption)]
+    database.close()
+
+
+@pytest.mark.parametrize(
+    ("global_watermark", "group_watermark", "expected_watermark"),
+    [
+        ("全局水印", None, "全局水印"),
+        ("全局水印", "频道水印", "频道水印"),
+        ("全局水印", "", ""),
+    ],
+)
+@pytest.mark.asyncio
+async def test_channel_group_watermark_overrides_or_inherits_global_value(
+    app_config,
+    global_watermark,
+    group_watermark,
+    expected_watermark,
+):
+    config = app_config(
+        daily_success_count=1,
+        watermark_text=global_watermark,
+        group_watermark_text=group_watermark,
+    )
+    group = config.channel_groups[0]
+    snapshot = MessageSnapshot(
+        message_id=1,
+        grouped_id=123,
+        caption="标签：#有效",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    database = StateDatabase(group.database_path)
+    media = FakeMedia(config)
+    service = AutomationService(
+        config,
+        group,
+        database,
+        FakeTelegram(snapshot),
+        media,
+        FakeReporter(),
+    )
+
+    summary = await service.run_once()
+
+    assert summary.published == 1
+    assert media.watermark_texts == [expected_watermark]
     database.close()
 
 

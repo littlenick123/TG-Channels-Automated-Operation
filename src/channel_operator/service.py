@@ -48,6 +48,11 @@ class AutomationService:
             if group.intro_footer is None
             else group.intro_footer
         )
+        self.watermark_text = (
+            config.watermark_text
+            if group.watermark_text is None
+            else group.watermark_text
+        )
 
     async def index(self) -> int:
         checkpoint = self.database.checkpoint(self.source_key)
@@ -182,8 +187,17 @@ class AutomationService:
             self.media.validate_source(source_info)
 
             self.database.set_status(self.source_key, group.grouped_id, "transcoding")
+            clipped = directory / "source_first_third.mkv"
+            clipped_info = await self.media.cut_first_third(
+                source, clipped, source_info
+            )
             output = directory / "video.mp4"
-            output_info = await self.media.transcode(source, output, source_info)
+            output_info = await self.media.transcode(
+                clipped,
+                output,
+                clipped_info,
+                watermark_text=self.watermark_text,
+            )
             frames = await self.media.screenshots(output, output_info.duration, directory)
             thumbnail = await self.media.thumbnail(
                 output, output_info.duration, directory / "video_thumb.jpg"

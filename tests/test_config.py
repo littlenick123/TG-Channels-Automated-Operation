@@ -61,6 +61,8 @@ def test_load_config_resolves_paths_and_lists(tmp_path: Path, monkeypatch):
     assert config.retry_delays_seconds == (30, 120, 360)
     assert config.intro_footer == ""
     assert config.output_height == 720
+    assert config.watermark_text == ""
+    assert config.channel_groups[0].watermark_text is None
 
 
 def test_channel_group_remark_is_optional_and_does_not_change_database_name(
@@ -280,6 +282,91 @@ def test_output_height_is_loaded(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
 
     assert load_config(path).output_height == 480
+
+
+def test_watermark_config_and_group_override_are_loaded(tmp_path: Path, monkeypatch):
+    font = tmp_path / "font.ttc"
+    font.write_bytes(b"test font placeholder")
+    path = tmp_path / "config.toml"
+    configured = BASE_CONFIG.replace(
+        "ffmpeg_threads = 3",
+        "ffmpeg_threads = 3\n"
+        'watermark_text = "  全局水印  "\n'
+        f'watermark_font_file = "{font.as_posix()}"',
+    ).replace(
+        'remark = "欧美中文字幕"',
+        'remark = "欧美中文字幕"\nwatermark_text = "  频道水印  "',
+    )
+    path.write_text(configured, encoding="utf-8")
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    config = load_config(path)
+
+    assert config.watermark_text == "全局水印"
+    assert config.watermark_font_file == font
+    assert config.channel_groups[0].watermark_text == "频道水印"
+
+
+@pytest.mark.parametrize("scope", ["processing", "channel_group"])
+def test_watermark_text_must_be_one_line(scope: str, tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    if scope == "processing":
+        configured = BASE_CONFIG.replace(
+            "ffmpeg_threads = 3",
+            'ffmpeg_threads = 3\nwatermark_text = "第一行\\n第二行"',
+        )
+    else:
+        configured = BASE_CONFIG.replace(
+            'remark = "欧美中文字幕"',
+            'remark = "欧美中文字幕"\nwatermark_text = "第一行\\n第二行"',
+        )
+    path.write_text(configured, encoding="utf-8")
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="watermark_text 必须是单行文本"):
+        load_config(path)
+
+
+def test_enabled_watermark_requires_existing_font(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        BASE_CONFIG.replace(
+            "ffmpeg_threads = 3",
+            'ffmpeg_threads = 3\nwatermark_text = "测试水印"\n'
+            'watermark_font_file = "missing-font.ttc"',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    with pytest.raises(ConfigError, match="视频水印字体文件不存在"):
+        load_config(path)
+
+
+def test_group_can_disable_global_watermark_without_font(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.toml"
+    configured = BASE_CONFIG.replace(
+        "ffmpeg_threads = 3",
+        'ffmpeg_threads = 3\nwatermark_text = "全局水印"\n'
+        'watermark_font_file = "missing-font.ttc"',
+    ).replace(
+        'remark = "欧美中文字幕"',
+        'remark = "欧美中文字幕"\nwatermark_text = ""',
+    )
+    path.write_text(configured, encoding="utf-8")
+    monkeypatch.setenv("TG_API_ID", "123")
+    monkeypatch.setenv("TG_API_HASH", "hash")
+    monkeypatch.setenv("TG_REPORT_BOT_TOKEN", "123:test")
+
+    config = load_config(path)
+
+    assert config.channel_groups[0].watermark_text == ""
 
 
 @pytest.mark.parametrize("value", [0, 9])

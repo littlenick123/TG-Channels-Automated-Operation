@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
+
+from PIL import ImageFont
 
 from .config import AppConfig
 from .models import VideoInfo
@@ -24,11 +27,14 @@ class MediaProcessor:
     def __init__(self, config: AppConfig):
         self.config = config
 
-    async def _run(self, *arguments: str) -> tuple[str, str]:
+    async def _run(
+        self, *arguments: str, cwd: Path | None = None
+    ) -> tuple[str, str]:
         process = await asyncio.create_subprocess_exec(
             *arguments,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
         )
         try:
             stdout, stderr = await process.communicate()
@@ -46,6 +52,21 @@ class MediaProcessor:
     async def version(self, executable: str) -> str:
         out, _ = await self._run(executable, "-version")
         return out.splitlines()[0] if out else executable
+
+    async def check_watermark_support(self) -> None:
+        try:
+            ImageFont.truetype(str(self.config.watermark_font_file), 24)
+        except OSError as exc:
+            raise MediaError(
+                f"无法加载视频水印字体：{self.config.watermark_font_file}"
+            ) from exc
+        out, _ = await self._run(
+            self.config.ffmpeg_path,
+            "-hide_banner",
+            "-filters",
+        )
+        if "drawtext" not in out:
+            raise MediaError("当前 FFmpeg 不包含 drawtext 滤镜，无法生成文字水印")
 
     async def probe(self, path: Path) -> VideoInfo:
         out, _ = await self._run(
@@ -101,15 +122,13 @@ class MediaProcessor:
             else (output_height, long_edge)
         )
 
-    async def transcode(self, source: Path, destination: Path, info: VideoInfo) -> VideoInfo:
-        bounds = self.transcode_bounds(
-            self.config.output_height,
-            landscape=info.display_width >= info.display_height,
-        )
-        scale = (
-            f"scale={bounds[0]}:{bounds[1]}:force_original_aspect_ratio=decrease:"
-            "force_divisible_by=2,setsar=1"
-        )
+    @staticmethod
+    def first_third_duration(duration: float) -> float:
+        return duration / 3
+
+    async def cut_first_third(
+        self, source: Path, destination: Path, info: VideoInfo
+    ) -> VideoInfo:
         await self._run(
             self.config.ffmpeg_path,
             "-hide_banner",
@@ -122,26 +141,122 @@ class MediaProcessor:
             "0:v:0",
             "-map",
             "0:a:0?",
-            "-vf",
-            scale,
-            "-c:v",
-            "libx264",
-            "-preset",
-            self.config.preset,
-            "-crf",
-            str(self.config.crf),
-            "-pix_fmt",
-            "yuv420p",
-            "-threads",
-            str(self.config.ffmpeg_threads),
-            "-c:a",
-            "aac",
-            "-b:a",
-            self.config.audio_bitrate,
-            "-movflags",
-            "+faststart",
+            "-t",
+            f"{self.first_third_duration(info.duration):.6f}",
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
             str(destination),
         )
+        return await self.probe(destination)
+
+    @staticmethod
+    def scaled_dimensions(
+        width: int, height: int, bounds: tuple[int, int]
+    ) -> tuple[int, int]:
+        ratio = min(bounds[0] / width, bounds[1] / height)
+        scaled_width = max(2, 2 * math.floor(width * ratio / 2))
+        scaled_height = max(2, 2 * math.floor(height * ratio / 2))
+        return scaled_width, scaled_height
+
+    def watermark_style(self, text: str, frame_width: int) -> tuple[int, int]:
+        font_size = max(1, round(self.config.output_height * 0.07))
+        maximum_width = frame_width * 0.9
+        while True:
+            border_width = max(1, round(font_size * 0.08))
+            font = ImageFont.truetype(
+                str(self.config.watermark_font_file), font_size
+            )
+            left, _, right, _ = font.getbbox(text, stroke_width=border_width)
+            text_width = right - left
+            if text_width <= maximum_width or font_size == 1:
+                return font_size, border_width
+            font_size = max(
+                1,
+                min(font_size - 1, math.floor(font_size * maximum_width / text_width)),
+            )
+
+    @staticmethod
+    def _escape_filter_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+    async def transcode(
+        self,
+        source: Path,
+        destination: Path,
+        info: VideoInfo,
+        *,
+        watermark_text: str = "",
+    ) -> VideoInfo:
+        bounds = self.transcode_bounds(
+            self.config.output_height,
+            landscape=info.display_width >= info.display_height,
+        )
+        filters = (
+            f"scale={bounds[0]}:{bounds[1]}:force_original_aspect_ratio=decrease:"
+            "force_divisible_by=2,setsar=1"
+        )
+        text_file: Path | None = None
+        if watermark_text:
+            frame_width, _ = self.scaled_dimensions(
+                info.display_width, info.display_height, bounds
+            )
+            font_size, border_width = self.watermark_style(
+                watermark_text, frame_width
+            )
+            text_file = destination.parent / "watermark_text.txt"
+            text_file.write_text(watermark_text, encoding="utf-8")
+            font_file = self._escape_filter_value(
+                self.config.watermark_font_file.as_posix()
+            )
+            watermark_start = max(0.0, info.duration - 10)
+            filters += (
+                ",drawtext="
+                f"fontfile='{font_file}':"
+                f"textfile='{text_file.name}':"
+                "expansion=none:fontcolor=white:bordercolor=black:"
+                f"borderw={border_width}:fontsize={font_size}:"
+                "x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"enable='gte(t\\,{watermark_start:.6f})'"
+            )
+        try:
+            await self._run(
+                self.config.ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(source.resolve()),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-vf",
+                filters,
+                "-c:v",
+                "libx264",
+                "-preset",
+                self.config.preset,
+                "-crf",
+                str(self.config.crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-threads",
+                str(self.config.ffmpeg_threads),
+                "-c:a",
+                "aac",
+                "-b:a",
+                self.config.audio_bitrate,
+                "-movflags",
+                "+faststart",
+                str(destination.resolve()),
+                cwd=destination.parent,
+            )
+        finally:
+            if text_file is not None:
+                text_file.unlink(missing_ok=True)
         return await self.probe(destination)
 
     @staticmethod

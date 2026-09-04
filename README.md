@@ -43,7 +43,8 @@
 - 仅选择具有 `grouped_id`、恰好包含一个视频且视频短边达到指定分辨率的媒体组。
 - 从源媒体组中只保留视频，不保留源媒体组原有图片。
 - 使用多路交错分片下载单个视频，支持 `.part` 文件断点续传。
-- 使用 FFmpeg 将视频转为 H.264/AAC，可通过 `output_height` 选择480P、720P等输出高度，并启用 `yuv420p` 和 `faststart`。
+- 先用 FFmpeg 流复制无损截取源视频的开头三分之一，再将该片段转为 H.264/AAC；可通过 `output_height` 选择480P、720P等输出高度。
+- 可在成片最后10秒的画面中央添加按输出高度等比缩放的白色黑边文字水印。
 - 为视频单独生成 10% 时间点的封面。
 - 在视频 15%、50%、85% 时间点生成三张内容截图。
 - 按标签过滤规则生成标签，并把简介转换为可折叠引用。
@@ -63,13 +64,14 @@
 1. 检查源消息和本地磁盘空间。
 2. 将源视频下载为 `source_video.mp4`，网络中断时保留 `.part` 文件。
 3. 使用 FFprobe 检查视频时长、分辨率、旋转信息和音频流。
-4. 使用 FFmpeg 转码为 `video.mp4`。
-5. 从转码成品的 10% 时间点生成 `video_thumb.jpg`，仅作为 Telegram 视频封面。
-6. 从转码成品的 15%、50%、85% 时间点生成三张内容截图。
-7. 生成过滤后的标签和简介文案。
-8. 上传视频、封面和图片，并通过一次相册发送请求发布。
-9. 将发布结果写入当前频道组自己的 SQLite 数据库。
-10. 删除当前媒体组的本地临时文件，然后才处理下一组。
+4. 使用 FFmpeg `-c copy` 无损截取开头三分之一为 `source_first_third.mkv`。
+5. 只对该片段执行缩放、结尾水印和编码，生成 `video.mp4`。
+6. 从转码成品的 10% 时间点生成 `video_thumb.jpg`，仅作为 Telegram 视频封面。
+7. 从转码成品的 15%、50%、85% 时间点生成三张内容截图。
+8. 生成过滤后的标签和简介文案。
+9. 上传视频、封面和图片，并通过一次相册发送请求发布。
+10. 将发布结果写入当前频道组自己的 SQLite 数据库。
+11. 删除当前媒体组的本地临时文件，然后才处理下一组。
 
 目标频道中可见的媒体组固定为：
 
@@ -175,7 +177,7 @@ cd /opt/telegram/TG-Channels-Automated-Operation
 
 ```bash
 apt update
-apt install -y python3.12 python3.12-venv ffmpeg git curl
+apt install -y python3.12 python3.12-venv ffmpeg fonts-noto-cjk git curl
 ```
 
 确认版本：
@@ -417,6 +419,8 @@ crf = 24
 preset = "medium"
 audio_bitrate = "128k"
 output_height = 480
+watermark_text = "更多精彩内容请关注频道"
+watermark_font_file = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 minimum_source_short_edge = 1080
 album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
@@ -431,6 +435,8 @@ disk_reserve_bytes = 1073741824
 | `preset` | `medium` | x264 编码速度预设。越慢通常压缩效率越高。 |
 | `audio_bitrate` | `128k` | AAC 音频码率。 |
 | `output_height` | `720` | 输出视频的目标短边高度，必须是 `144–2160` 范围内的偶数；示例使用 `480`。 |
+| `watermark_text` | 空字符串 | 全局默认视频水印，显示在成片最后10秒；空字符串关闭水印。 |
+| `watermark_font_file` | Noto CJK 路径 | 水印字体文件。相对路径按 `config.toml` 所在目录解析。 |
 | `minimum_source_short_edge` | `1080` | 源视频短边至少达到该像素数才可参与选择。 |
 | `album_settle_seconds` | `300` | 媒体组最后一条消息发布后至少等待多少秒再处理，避免索引到尚未发送完整的媒体组。 |
 | `disk_reserve_bytes` | `1073741824` | 除“源文件大小 × 3”外额外保留的磁盘空间，示例为 1 GiB。 |
@@ -441,11 +447,45 @@ disk_reserve_bytes = 1073741824
 - 音频编码：AAC。
 - 像素格式：`yuv420p`。
 - MP4：`+faststart`。
+- 下载完成后先用 `-c copy` 将源视频开头三分之一无损封装为临时 MKV；这个步骤不重新编码，通常只需很短时间。
+- 无损截取以实际媒体包和时间戳为边界，片段时长可能与数学上的三分之一存在很小误差；程序会重新探测片段，并以实际时长继续处理。
+- 后续缩放、水印和 H.264/AAC 编码只处理该临时片段，因此编码工作量约为处理完整源视频的三分之一。
+- 水印在成片最后10秒显示；成片不足10秒时全程显示。文字水平和垂直居中，使用白字黑边。
+- 水印基准字号约为 `output_height` 的7%，黑边同步缩放；文字过长时会自动缩小到画面宽度的90%以内。
+- 水印支持单行中文、英文、数字和常见符号，不保证彩色 Emoji 的显示效果。
 - `output_height = 720` 时，横屏最大边界为 `1280×720`，竖屏为 `720×1280`。
 - `output_height = 480` 时，横屏最大边界约为 `854×480`，竖屏为 `480×854`。
 - 保持宽高比并确保输出尺寸为偶数。
 - 修改 `output_height` 后只需重启已包含此功能的容器，不需要重新构建镜像。
 - 转码、截图和媒体组全部串行处理。
+- 封面10%和截图15%/50%/85%的时间点均按截取后的成片时长计算；落在最后10秒内的截图会包含水印。
+
+#### 视频水印继承规则
+
+- `[processing].watermark_text` 是所有频道组的默认视频水印。
+- 频道组没有填写 `watermark_text` 时继承全局值。
+- 频道组填写非空文字时使用频道组专属水印。
+- 频道组显式填写 `watermark_text = ""` 时关闭该组水印，即使全局水印非空也不会添加。
+- 修改水印文字或 `output_height` 后只需重启已经包含此功能的容器；不需要重新构建镜像。
+- 首次升级到包含水印功能的版本时，必须重新构建镜像，因为镜像增加了 Pillow 和 Noto CJK 中文字体。
+
+例如全局启用水印，但关闭 `channel_c`：
+
+```toml
+[processing]
+watermark_text = "更多精彩内容请关注频道"
+watermark_font_file = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+
+[[channel_groups]]
+name = "channel_b"
+# 未配置 watermark_text，继承全局水印
+# 其余字段略
+
+[[channel_groups]]
+name = "channel_c"
+watermark_text = ""
+# 其余字段略
+```
 
 ### `[runtime]` 运行限制和工作目录
 
@@ -539,6 +579,7 @@ retry_delays_seconds = [30, 120, 360]
 name = "channel_b"
 remark = "欧美中文字幕"
 intro_footer = "点击频道名称查看更多内容"
+watermark_text = "本频道专属水印"
 source_channel = -1001234567890
 target_channel = -1009876543210
 daily_success_count = 4
@@ -549,6 +590,7 @@ daily_success_count = 4
 | `name` | 是 | 频道组唯一名称，长度 1–64，只允许字母、数字、下划线和连字符，且首字符必须是字母或数字。 |
 | `remark` | 否 | 便于辨识频道组的单行中文备注，最多 100 个字符；机器人告警、最终汇总和命令行输出会显示该备注。 |
 | `intro_footer` | 否 | 本频道组的单行追加文字。未配置时继承 `[content].intro_footer`；填写文字时覆盖全局值；设置为空字符串时关闭本组追加内容。 |
+| `watermark_text` | 否 | 本频道组的视频水印。未配置时继承 `[processing].watermark_text`；填写文字时覆盖全局值；设置为空字符串时关闭本组水印。 |
 | `source_channel` | 是 | 源频道数字 ID 或用户名。多个频道组可以使用同一个源频道。 |
 | `target_channel` | 是 | 目标频道数字 ID 或用户名。用户账号必须具有发帖权限。 |
 | `daily_success_count` | 是 | daily 模式为当天累计目标；continuous 模式为每次轮到该组时的本轮目标。必须大于 0 且不能超过 `max_candidates_per_run`。 |
@@ -633,6 +675,8 @@ crf = 24
 preset = "medium"
 audio_bitrate = "128k"
 output_height = 480
+watermark_text = "更多精彩内容请关注频道"
+watermark_font_file = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 minimum_source_short_edge = 1080
 album_settle_seconds = 300
 disk_reserve_bytes = 1073741824
@@ -653,6 +697,7 @@ retry_delays_seconds = [30, 120, 360]
 name = "channel_b"
 remark = "欧美中文字幕"
 intro_footer = "点击频道名称查看更多内容"
+watermark_text = "本频道专属水印"
 source_channel = -1001111111111
 target_channel = -1002222222222
 daily_success_count = 4
@@ -661,6 +706,7 @@ daily_success_count = 4
 name = "channel_c"
 remark = "欧美精选"
 intro_footer = ""
+watermark_text = ""
 source_channel = -1001111111111
 target_channel = -1003333333333
 daily_success_count = 4

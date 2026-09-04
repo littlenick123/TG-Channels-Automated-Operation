@@ -66,6 +66,15 @@ def _parse_intro_footer(raw: Any, field_name: str) -> str:
     return value
 
 
+def _parse_watermark_text(raw: Any, field_name: str) -> str:
+    if not isinstance(raw, str):
+        raise ConfigError(f"{field_name} 必须是字符串")
+    value = raw.strip()
+    if "\n" in value or "\r" in value:
+        raise ConfigError(f"{field_name} 必须是单行文本")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ChannelGroupConfig:
     name: str
@@ -75,6 +84,7 @@ class ChannelGroupConfig:
     daily_success_count: int
     remark: str = ""
     intro_footer: str | None = None
+    watermark_text: str | None = None
 
     @property
     def display_name(self) -> str:
@@ -111,6 +121,8 @@ class AppConfig:
     preset: str
     audio_bitrate: str
     output_height: int
+    watermark_text: str
+    watermark_font_file: Path
     minimum_source_short_edge: int
     album_settle_seconds: int
     disk_reserve_bytes: int
@@ -191,6 +203,16 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         output_height = int(processing.get("output_height", 720))
     except (TypeError, ValueError) as exc:
         raise ConfigError("output_height 必须是整数") from exc
+    watermark_text = _parse_watermark_text(
+        processing.get("watermark_text", ""), "processing.watermark_text"
+    )
+    watermark_font_raw = processing.get(
+        "watermark_font_file",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    )
+    if not isinstance(watermark_font_raw, str) or not watermark_font_raw.strip():
+        raise ConfigError("processing.watermark_font_file 必须是非空路径")
+    watermark_font_file = _resolve_path(base, watermark_font_raw.strip())
 
     raw_groups = data.get("channel_groups")
     if not isinstance(raw_groups, list) or not raw_groups:
@@ -233,6 +255,13 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
             if "intro_footer" in raw_group
             else None
         )
+        group_watermark_text = (
+            _parse_watermark_text(
+                raw_group["watermark_text"], f"频道组 {name} 的 watermark_text"
+            )
+            if "watermark_text" in raw_group
+            else None
+        )
         if "database_path" in raw_group:
             raise ConfigError(
                 f"频道组 {name} 不再使用 database_path；"
@@ -260,6 +289,7 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
                 daily_success_count=daily_success_count,
                 remark=remark,
                 intro_footer=group_intro_footer,
+                watermark_text=group_watermark_text,
             )
         )
 
@@ -326,6 +356,8 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         preset=str(processing.get("preset", "medium")),
         audio_bitrate=str(processing.get("audio_bitrate", "128k")),
         output_height=output_height,
+        watermark_text=watermark_text,
+        watermark_font_file=watermark_font_file,
         minimum_source_short_edge=int(processing.get("minimum_source_short_edge", 1080)),
         album_settle_seconds=int(processing.get("album_settle_seconds", 300)),
         disk_reserve_bytes=int(processing.get("disk_reserve_bytes", 1_073_741_824)),
@@ -368,6 +400,16 @@ def load_config(path: str | Path = "config.toml") -> AppConfig:
         raise ConfigError("output_height 必须在 144 到 2160 之间")
     if config.output_height % 2:
         raise ConfigError("output_height 必须是偶数")
+    watermark_enabled = any(
+        (
+            config.watermark_text
+            if group.watermark_text is None
+            else group.watermark_text
+        )
+        for group in config.channel_groups
+    )
+    if watermark_enabled and not config.watermark_font_file.is_file():
+        raise ConfigError(f"视频水印字体文件不存在：{config.watermark_font_file}")
     if not 1 <= config.caption_limit <= 1024:
         raise ConfigError("caption_limit 必须在 1 到 1024 之间")
     if not 1 <= config.download_concurrency <= 8:
