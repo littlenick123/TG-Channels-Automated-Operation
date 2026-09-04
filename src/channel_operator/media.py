@@ -160,8 +160,10 @@ class MediaProcessor:
         scaled_height = max(2, 2 * math.floor(height * ratio / 2))
         return scaled_width, scaled_height
 
-    def watermark_style(self, text: str, frame_width: int) -> tuple[int, int]:
-        font_size = max(1, round(self.config.output_height * 0.07))
+    def watermark_style(
+        self, text: str, frame_width: int, frame_height: int
+    ) -> tuple[int, int]:
+        font_size = max(1, round(frame_height * 0.05))
         maximum_width = frame_width * 0.9
         while True:
             border_width = max(1, round(font_size * 0.08))
@@ -199,26 +201,25 @@ class MediaProcessor:
         )
         text_file: Path | None = None
         if watermark_text:
-            frame_width, _ = self.scaled_dimensions(
+            frame_width, frame_height = self.scaled_dimensions(
                 info.display_width, info.display_height, bounds
             )
             font_size, border_width = self.watermark_style(
-                watermark_text, frame_width
+                watermark_text, frame_width, frame_height
             )
             text_file = destination.parent / "watermark_text.txt"
             text_file.write_text(watermark_text, encoding="utf-8")
             font_file = self._escape_filter_value(
                 self.config.watermark_font_file.as_posix()
             )
-            watermark_start = max(0.0, info.duration - 10)
             filters += (
                 ",drawtext="
                 f"fontfile='{font_file}':"
                 f"textfile='{text_file.name}':"
                 "expansion=none:fontcolor=white:bordercolor=black:"
                 f"borderw={border_width}:fontsize={font_size}:"
-                "x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"enable='gte(t\\,{watermark_start:.6f})'"
+                "x=(w-text_w)/2:y=h*0.03:"
+                "enable='gte(t\\,180)*lt(mod(t-180\\,180)\\,10)'"
             )
         try:
             await self._run(

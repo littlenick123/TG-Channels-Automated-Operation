@@ -42,7 +42,7 @@ def test_first_third_duration():
 
 
 @pytest.mark.skipif(WATERMARK_FONT is None, reason="没有可用的中日韩字体")
-def test_watermark_size_scales_with_output_height_and_shrinks_long_text(app_config):
+def test_watermark_size_uses_actual_frame_height_and_shrinks_long_text(app_config):
     processor_720 = MediaProcessor(
         app_config(output_height=720, watermark_font_file=WATERMARK_FONT)
     )
@@ -50,10 +50,13 @@ def test_watermark_size_scales_with_output_height_and_shrinks_long_text(app_conf
         app_config(output_height=480, watermark_font_file=WATERMARK_FONT)
     )
 
-    assert processor_720.watermark_style("短水印", 1280) == (50, 4)
-    assert processor_480.watermark_style("短水印", 854) == (34, 3)
-    long_size, _ = processor_480.watermark_style("很长的水印文字" * 20, 854)
-    assert long_size < 34
+    assert processor_720.watermark_style("短水印", 1280, 720) == (36, 3)
+    assert processor_480.watermark_style("短水印", 854, 480) == (24, 2)
+    assert processor_480.watermark_style("短水印", 480, 854) == (43, 3)
+    long_size, _ = processor_480.watermark_style(
+        "很长的水印文字" * 20, 854, 480
+    )
+    assert long_size < 24
 
 
 @pytest.mark.parametrize(
@@ -110,7 +113,7 @@ async def test_transcode_and_extract_three_frames(
 
 @pytest.mark.skipif(WATERMARK_FONT is None, reason="没有可用的中日韩字体")
 @pytest.mark.asyncio
-async def test_watermark_is_centered_only_during_last_ten_seconds(
+async def test_watermark_is_top_centered_for_ten_seconds_every_three_minutes(
     app_config,
     tmp_path: Path,
 ):
@@ -126,7 +129,7 @@ async def test_watermark_is_centered_only_during_last_ten_seconds(
         "-f",
         "lavfi",
         "-i",
-        "color=c=black:size=640x360:rate=5:duration=12",
+        "color=c=black:size=640x360:rate=1:duration=371",
         "-c:v",
         "libx264",
         "-preset",
@@ -145,9 +148,11 @@ async def test_watermark_is_centered_only_during_last_ten_seconds(
         info,
         watermark_text="测试 Watermark: 100% 'ok'",
     )
-    before = tmp_path / "before.jpg"
-    during = tmp_path / "during.jpg"
-    for timestamp, destination in ((1, before), (6, during)):
+    samples = {
+        timestamp: tmp_path / f"at-{timestamp}.jpg"
+        for timestamp in (179, 180, 189, 190, 359, 360, 369, 370)
+    }
+    for timestamp, destination in samples.items():
         process = await asyncio.create_subprocess_exec(
             config.ffmpeg_path,
             "-hide_banner",
@@ -164,14 +169,19 @@ async def test_watermark_is_centered_only_during_last_ten_seconds(
         )
         assert await process.wait() == 0
 
-    with Image.open(before) as image:
-        assert max(channel[1] for channel in image.convert("RGB").getextrema()) < 32
-    with Image.open(during) as image:
+    for timestamp in (179, 190, 359, 370):
+        with Image.open(samples[timestamp]) as image:
+            assert max(channel[1] for channel in image.convert("RGB").getextrema()) < 32
+    for timestamp in (180, 189, 360, 369):
+        with Image.open(samples[timestamp]) as image:
+            assert max(channel[1] for channel in image.convert("RGB").getextrema()) > 200
+
+    with Image.open(samples[180]) as image:
         rgb = image.convert("RGB")
-        assert max(channel[1] for channel in rgb.getextrema()) > 200
         watermark_bounds = rgb.convert("L").point(lambda value: value > 100).getbbox()
         assert watermark_bounds is not None
         left, top, right, bottom = watermark_bounds
         assert (left + right) / 2 == pytest.approx(rgb.width / 2, abs=5)
-        assert (top + bottom) / 2 == pytest.approx(rgb.height / 2, abs=5)
+        assert top == pytest.approx(rgb.height * 0.03, abs=8)
+        assert bottom < rgb.height * 0.2
     assert not (tmp_path / "watermark_text.txt").exists()

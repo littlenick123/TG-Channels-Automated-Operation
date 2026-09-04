@@ -51,7 +51,7 @@ preset = "medium"
 audio_bitrate = "128k"
 # 输出视频的目标短边高度；480 对应横屏约854×480、竖屏约480×854
 output_height = 480
-# 全局默认视频水印；显示在截取后成片的最后10秒，空字符串表示关闭
+# 全局默认视频水印；从成片3:00起每3分钟显示10秒，空字符串表示关闭
 watermark_text = "更多精彩内容请关注频道"
 # 视频水印使用的中文字体；Docker 镜像已安装此字体
 watermark_font_file = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
