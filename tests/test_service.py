@@ -9,6 +9,7 @@ from channel_operator.models import DeliveryReceipt, MessageSnapshot, VideoInfo
 from channel_operator.service import AutomationService
 from channel_operator.telegram import (
     ChannelGroupUnavailable,
+    DeliveryUncertainError,
     DownloadTooSlowError,
     TelegramError,
 )
@@ -504,6 +505,73 @@ async def test_low_speed_group_is_cleaned_marked_retryable_and_replaced(app_conf
     assert telegram.downloaded_message_ids == [slow.message_id, replacement.message_id]
     assert list(config.work_dir.iterdir()) == []
     assert database.counts(str(group.source_channel))["retryable"] == 1
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_delivery_is_permanently_skipped_reported_and_replaced(
+    app_config,
+):
+    config = app_config(daily_success_count=1, remark="测试频道")
+    group = config.channel_groups[0]
+    published_at = datetime.now(UTC) - timedelta(hours=1)
+    uncertain = MessageSnapshot(
+        message_id=12,
+        grouped_id=557,
+        caption="标签：#不确定\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+    replacement = MessageSnapshot(
+        message_id=13,
+        grouped_id=558,
+        caption="标签：#替补\n简介：内容",
+        is_video=True,
+        is_photo=False,
+        width=1920,
+        height=1080,
+        duration=180,
+        file_size=100,
+        published_at=published_at,
+    )
+
+    class UncertainFirstDelivery(FakeTelegram):
+        async def copy_album(self, staging_message_ids, delivery_started_at):
+            self.copy_calls += 1
+            if self.copy_calls == 1:
+                raise DeliveryUncertainError("Bot API 返回超时")
+            return DeliveryReceipt((201, 202, 203, 204), 1999)
+
+    database = StateDatabase(group.database_path)
+    database.save_messages(
+        str(group.source_channel), [uncertain, replacement], replacement.message_id
+    )
+    database.refresh_groups(str(group.source_channel))
+    database.begin_attempt(str(group.source_channel), uncertain.grouped_id, "2026-08-11")
+    telegram = UncertainFirstDelivery([uncertain, replacement])
+    reporter = FakeReporter()
+    service = AutomationService(
+        config, group, database, telegram, FakeMedia(config), reporter
+    )
+
+    summary = await service.run_once()
+
+    assert summary.published == 1
+    assert summary.rejected == 1
+    assert telegram.downloaded_message_ids == [uncertain.message_id, replacement.message_id]
+    assert database.group_status(str(group.source_channel), uncertain.grouped_id) == (
+        "rejected"
+    )
+    assert database.counts(str(group.source_channel))["rejected"] == 1
+    assert len(reporter.messages) == 1
+    assert "媒体组已永久跳过" in reporter.messages[0]
+    assert "备注：测试频道" in reporter.messages[0]
+    assert "将自动选择其他媒体组继续" in reporter.messages[0]
     database.close()
 
 

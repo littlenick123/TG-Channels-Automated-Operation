@@ -89,6 +89,34 @@ class AutomationService:
                 values["reconciled"] = 1
             self._record_stats(stats_date=published_date, **values)
 
+    async def _skip_uncertain_delivery(
+        self,
+        group: MediaGroup,
+        error: DeliveryUncertainError,
+        *,
+        continuous: bool,
+    ) -> None:
+        reason = f"投递结果无法确认，已永久跳过以避免重复发布：{error}"
+        LOGGER.warning("媒体组 %s 投递结果不确定，已永久跳过", group.grouped_id)
+        self.database.mark_failure(
+            self.source_key,
+            group.grouped_id,
+            reason,
+            permanent=True,
+        )
+        if continuous:
+            self._record_stats(rejected=1)
+        await self.reporter.send(
+            "⚠️ 媒体组已永久跳过\n"
+            f"组名：{self.group.name}\n"
+            f"备注：{self.group.remark or '无'}\n"
+            f"源频道：{self.group.source_channel}\n"
+            f"目标频道：{self.group.target_channel}\n"
+            f"媒体组：{group.grouped_id}\n"
+            f"原因：{error}\n"
+            "处理：已记录为永久跳过，将自动选择其他媒体组继续"
+        )
+
     async def index(self) -> int:
         checkpoint = self.database.checkpoint(self.source_key)
         batch = []
@@ -498,15 +526,10 @@ class AutomationService:
                     if continuous:
                         self._record_stats(retryable_failures=1)
                 except DeliveryUncertainError as exc:
-                    self.database.mark_delivery_failure(
-                        self.source_key,
-                        group.grouped_id,
-                        str(exc),
-                        uncertain=True,
+                    await self._skip_uncertain_delivery(
+                        group, exc, continuous=continuous
                     )
-                    if continuous:
-                        self._record_stats(retryable_failures=1)
-                    raise
+                    summary.rejected += 1
                 except ChannelGroupUnavailable as exc:
                     if self.database.group_status(
                         self.source_key, group.grouped_id
@@ -578,12 +601,10 @@ class AutomationService:
                 if continuous:
                     self._record_stats(rejected=1)
             except DeliveryUncertainError as exc:
-                self.database.mark_delivery_failure(
-                    self.source_key, group.grouped_id, str(exc), uncertain=True
+                await self._skip_uncertain_delivery(
+                    group, exc, continuous=continuous
                 )
-                if continuous:
-                    self._record_stats(retryable_failures=1)
-                raise
+                summary.rejected += 1
             except ChannelGroupUnavailable as exc:
                 current_status = self.database.group_status(
                     self.source_key, group.grouped_id

@@ -12,3 +12,4 @@ __pycache__/
 work/
 data/
 config.toml
+VPS.key
